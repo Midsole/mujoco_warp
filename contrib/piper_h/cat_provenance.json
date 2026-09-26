@@ -1,0 +1,39 @@
+{
+  "source": "/home/yangyunchen/Documents/LAN-Share/stl/cat_phone_stand.stl",
+  "source_sha256": "9acaa560d691f07e9b7aefdc4156ceaf5a670225e7a7f3df23838531f22c2b4a",
+  "obj_sha256": "f28535fcaf83b36789b626fe1e085244394371ec9ab076590625212ef3e16f8f",
+  "triangles": 468114,
+  "vertices": 234059,
+  "source_bounds_mm": [
+    [
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      46.378143310546875,
+      102.80007934570312,
+      76.6323013305664
+    ]
+  ],
+  "source_offset_mm": [
+    23.189071655273438,
+    51.40003967285156,
+    0.0
+  ],
+  "scale": 0.001,
+  "bounds_m": [
+    [
+      -0.02318907165527344,
+      -0.05140003967285156,
+      0.0
+    ],
+    [
+      0.02318907165527344,
+      0.05140003967285156,
+      0.07663230133056641
+    ]
+  ],
+  "nonmanifold_edges": 0,
+  "notes": "No decimation or convex decomposition; duplicate STL vertices are merged without changing triangles."
+}

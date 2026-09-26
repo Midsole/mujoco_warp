@@ -1,0 +1,17 @@
+{
+  "model": "PiPER H six-axis arm (without gripper)",
+  "source_repository": "https://github.com/agilexrobotics/agx_arm_urdf",
+  "source_commit": "f6642ce0d7872c686f29c99e9e10cd23d1d49313",
+  "license": "MIT",
+  "urdf_sha256": "04cd040720a45267d7d8c0449b06657c0d98259e27c88e8c3c74a3ea03746aaf",
+  "mjcf_notes": "Joint frames, axes, limits, masses, centers of mass and full inertia matrices were transcribed from the pinned URDF. Collision shapes, damping, friction, armature and actuators are simulation defaults.",
+  "files": {
+    "base_link.stl": "11105df3b27e8ba50429f75334abae7d37eb13fc54d7a711ccd16968d2b05d42",
+    "link1.stl": "55ed2dc7e060800e510505c23f7dc5d1f3d6e7b21d70a689e471fb525add4b1f",
+    "link2.stl": "4b60473539386cd5d81090eee3dbc8c8a10b3d81798b73da1ca4aed97990c49e",
+    "link3.stl": "4ea19f971be435ede84f647c11408d9de6c230d3a9ac7e06582cbc8102bf3dc7",
+    "link4.stl": "2077c29f1f370aaaa922be19be1610ce6a0a2553e0953a75fcb703bdb3fc2c07",
+    "link5.stl": "964670daa2832688d2322d6d67029de555d8e626211fea30f68e90b96c6d0fe3",
+    "link6.stl": "9222c39f2291d7b9839b1254b06a22876b19c071608041462a69bf7b565704a3"
+  }
+}

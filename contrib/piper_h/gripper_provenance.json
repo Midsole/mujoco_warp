@@ -1,0 +1,24 @@
+{
+  "source": "https://github.com/agilexrobotics/agx_arm_urdf",
+  "commit": "f6642ce0d7872c686f29c99e9e10cd23d1d49313",
+  "license": "MIT",
+  "adaptations": [
+    "Flattened arm URDF and gripper Xacro; removed ROS mesh references, world and massless virtual gripper joint.",
+    "MuJoCo Warp solves the two physical finger joints with opposite half-opening targets; mimic tags were removed to keep this explicit symmetric control.",
+    "Collision proxies from sibling Simulation MJCF; finger proxies defined in piper.py. Visual meshes retain original link-local coordinates.",
+    "Canvas _low.stl meshes simplified offline using fast-simplification 0.2.0."
+  ],
+  "local_source": "PhysicalEngine/models/piper/piper_h.urdf and PhysicalEngine/assets/piper",
+  "urdf_sha256": "0e797b33045263f16c18b8d05e9af9bdaf264c0f07c933e75d98915d1520c312",
+  "files": {
+    "flange.stl": "f9ce752f93a6598858a779e3d8755a09e466b588efcffc3a1c3953773753a22b",
+    "gripper_base.stl": "0b839dc0bcb7d94e3422c74f6396b54a0441ba4836448ab5586e7f372d1bdbf3",
+    "gripper_link1.stl": "475a7d8db056524d7659fadf5a2c307d62791047b6214d733dfc7846ed1c613d",
+    "gripper_link2.stl": "3f88d534a85e28a33ef7d2061adacbd1d25214aa9325f9e464aad0f9e4b74606"
+  },
+  "mjcf_adaptations": [
+    "Preserve flange and gripper joint transforms, limits, masses and full inertia tensors.",
+    "Retain two physical slides; enforce opposite displacements with a joint equality and drive their difference as nominal opening (0-0.1 m).",
+    "Collision primitives follow PhysicalEngine/piper.py; position servo and coupling are simulation defaults."
+  ]
+}

@@ -1,0 +1,46 @@
+<mujoco model="PiPER H SDF pick and place">
+  <include file="piper_h.xml"/>
+
+  <option timestep="0.001" gravity="0 0 -9.81" integrator="implicitfast" cone="elliptic" iterations="50"
+          sdf_initpoints="40" sdf_iterations="10"/>
+  <size nconmax="256" njmax="1024"/>
+  <statistic center="0 0 0.65" extent="1.65"/>
+
+  <visual>
+    <global azimuth="135" elevation="-25" offwidth="1280" offheight="960"/>
+    <quality shadowsize="2048"/>
+    <headlight diffuse="0.55 0.58 0.62" ambient="0.3 0.3 0.3" specular="0.2 0.2 0.2"/>
+  </visual>
+
+  <asset>
+    <mesh name="cat_phone_stand" file="cat_phone_stand.obj" inertia="exact"/>
+    <texture name="floor_grid" type="2d" builtin="checker" rgb1="0.17 0.20 0.24"
+             rgb2="0.21 0.24 0.28" width="512" height="512"/>
+    <material name="floor_material" texture="floor_grid" texrepeat="6 6" texuniform="true"/>
+    <material name="tabletop_material" rgba="0.67 0.48 0.29 1" roughness="0.8"/>
+    <material name="table_frame_material" rgba="0.18 0.21 0.25 1" roughness="0.6"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 -1 3" dir="0 0 -1" directional="true"/>
+    <light pos="-1 1 2" dir="0.5 -0.5 -1" diffuse="0.4 0.4 0.4" castshadow="false"/>
+    <camera name="overview" pos="1.8 -2.2 1.8" xyaxes="0.774 0.633 0 -0.238 0.291 0.927"/>
+    <geom name="floor" type="plane" size="3 3 0.05" material="floor_material"/>
+    <!-- Fixed workbench: the top surface is at z=0.75 m. -->
+    <body name="table">
+      <geom name="tabletop" type="box" pos="0 0 0.73" size="0.6 0.4 0.02" material="tabletop_material"/>
+      <geom name="leg_fl" type="box" pos="-0.54 -0.34 0.355" size="0.035 0.035 0.355" material="table_frame_material"/>
+      <geom name="leg_fr" type="box" pos="0.54 -0.34 0.355" size="0.035 0.035 0.355" material="table_frame_material"/>
+      <geom name="leg_bl" type="box" pos="-0.54 0.34 0.355" size="0.035 0.035 0.355" material="table_frame_material"/>
+      <geom name="leg_br" type="box" pos="0.54 0.34 0.355" size="0.035 0.035 0.355" material="table_frame_material"/>
+    </body>
+    <body name="cat_phone_stand" pos="-0.16 -0.075 0.7505">
+      <freejoint name="cat_free"/>
+      <geom name="cat_sdf" type="sdf" mesh="cat_phone_stand" mass="0.1" rgba="0.82 0.55 0.18 0"
+            friction="0.8 0.005 0.0001" condim="4" priority="1" solref="0.004 1" solimp="0.95 0.99 0.001"/>
+      <!-- mjviser currently renders meshes but not native SDF geoms. No extra mass or collision. -->
+      <geom name="cat_visual" type="mesh" mesh="cat_phone_stand" mass="0" contype="0" conaffinity="0"
+            group="1" rgba="0.82 0.55 0.18 1"/>
+    </body>
+  </worldbody>
+</mujoco>

@@ -79,6 +79,23 @@ MuJoCo Warp simulates many kinds of physical systems, from rigid bodies with con
 
 Each of these scenes is benchmarked nightly and the [results are published nightly](https://google-deepmind.github.io/mujoco_warp/nightly/).
 
+## PiPER H cat grasping demo
+
+A table-mounted PiPER H with a parallel gripper picks up a cat-shaped phone stand, moves it 15 cm, and releases it onto the table. The object uses native SDF collisions and is carried by contact and friction. This standalone example is not part of the benchmark suite.
+
+![PiPER H grasping and transporting the cat](contrib/piper_h/grasp_preview.png)
+
+Run from the repository root:
+
+```bash
+uv run python contrib/piper_h/grasp.py                       # Warp GPU, native viewer
+uv run python contrib/piper_h/grasp.py --engine=c            # MuJoCo CPU
+uv run python contrib/piper_h/grasp.py --viewer=viser        # Web viewer (requires dev extra)
+uv run python contrib/piper_h/grasp.py --headless            # GPU validation without a window
+```
+
+See the [Chinese usage guide](contrib/piper_h/README.md) for setup, assets, simulation parameters, and validation, or view the [grasping animation](contrib/piper_h/grasp_preview.webp).
+
 # Tips for developers
 
 To set up MJWarp for development:

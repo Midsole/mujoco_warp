@@ -1,0 +1,120 @@
+# PiPER H 抓取猫猫演示
+
+桌边安装的 PiPER H 六轴机械臂使用双指夹爪，将猫猫手机架抓起、抬升 10 cm、横移 15 cm，再放下、松爪并退回。物体作为自由刚体，通过接触和摩擦被搬运，使用原生 SDF 碰撞。
+
+![抓取、抬升、横移和释放](grasp_preview.png)
+
+[查看搬运动画](grasp_preview.webp)。预览来自 Warp 动力学回放。
+
+## 启动
+
+在仓库根目录执行。所需模型已包含在示例中，不依赖旧项目目录或 ROS。
+
+```bash
+# 安装运行、测试和网页查看器依赖
+uv sync --locked --extra dev
+
+# 默认 Warp GPU 后端，原生 MuJoCo 窗口
+uv run python contrib/piper_h/grasp.py
+
+# MuJoCo CPU 后端
+uv run python contrib/piper_h/grasp.py --engine=c
+
+# 网页查看器，打开终端打印的本地地址
+uv run python contrib/piper_h/grasp.py --viewer=viser
+
+# 无界面完整搬运验证，失败时返回非零退出码
+uv run python contrib/piper_h/grasp.py --headless --engine=c
+uv run python contrib/piper_h/grasp.py --headless --engine=warp
+```
+
+一次动作约 24 秒仿真时间，结束后保持最后的控制目标。首次启动需要编译网格八叉树和 Warp 内核，实际播放速度取决于设备和查看器开销。
+
+终端会依次提示模型编译、轨迹生成和播放进度。前 1 秒仿真时间用于让物体落稳，之后机械臂开始接近。原生窗口将多个 1 ms 物理步合并到一次画面刷新，目标刷新率约 60 Hz；算力不足时播放仍会慢于实时，可根据终端的仿真时间判断是否在推进。
+
+原生窗口中，空格暂停/继续，句号单步。关闭窗口或在终端按 Ctrl+C 退出；网页模式需要在终端按 Ctrl+C 停止服务，关闭标签页不会停止仿真。重新执行命令可重新播放，查看器的 Reset 不会重置轨迹回放游标。回放期间自动目标会覆盖手动控制。
+
+请通过 `grasp.py` 启动：脚本配置八叉树深度与机器人重力补偿，补全物体初始自由关节状态，再将临时 MJB 和 NPZ 控制轨迹传给仓库现有查看器，退出后清理临时文件。直接打开 XML 不包含这些运行配置。
+
+## 文件说明
+
+| 文件 | 用途 |
+| --- | --- |
+| `grasp.py` | 唯一演示入口：模型配置、IK、控制轨迹、CPU 验证及查看器启动 |
+| `grasp_warp.py` | Warp GPU 仿真与接触记录 |
+| `grasp_viewer.py` | 复用现有查看器，为原生窗口分离物理步进和画面刷新 |
+| `grasp_scene.xml` | 桌子、地面、灯光、相机和猫猫 SDF 物体 |
+| `piper_h.xml` | 六轴机械臂、夹爪、位置执行器及初始关键帧 |
+| `meshes/` | 机械臂和夹爪 STL、猫猫完整 OBJ |
+| `prepare_cat.py` / `cat_provenance.json` | 猫模型转换脚本、来源、坐标换算与哈希 |
+| `grasp_test.py` / `grasp_viewer_test.py` | 资产、模型、完整搬运及原生播放节奏、暂停和单步测试 |
+| `grasp_preview.png` / `grasp_preview.webp` | 抓取预览和动画 |
+| `piper_h*.urdf`、`provenance.json`、`gripper_provenance.json` | 原始参考模型及机械臂、夹爪来源记录，不作为运行入口 |
+| `LICENSE.agx_arm_urdf` | 机械臂及夹爪上游 MIT 许可证 |
+
+## 场景与控制
+
+坐标 Z 向上，长度单位为米，角度单位为弧度。
+
+| 参数 | 默认设置 |
+| --- | --- |
+| 桌面长 × 宽 / 高度 / 厚度 | 1.2 × 0.8 / 0.75 / 0.04 m，四条固定桌腿 |
+| 固定机械臂基座 | `(-0.50, 0, 0.75)`，朝向 +X |
+| 初始六轴关节角 / 夹爪开度 | `[0, 90, -90, 0, 0, 0]°` / 0.08 m |
+| 猫模型尺寸 | 约 46.38 × 102.80 × 76.63 mm，保留原始 Z 向上姿态 |
+| 物体质量 / 滑动摩擦 | 0.1 kg / 0.8，可在 `grasp_scene.xml` 调整 |
+| 初始水平包围盒中心 / 最低点 Z | `(-0.16, -0.075)` / `0.7505` m |
+| 搬运目标中心 XY | `(-0.16, 0.075)` m |
+| 抓取 TCP / 抬升目标 Z | `0.79` / `0.89` m |
+| 自由度 / 执行器数 | 14 / 7：六轴、两个手指、物体六维自由运动；夹爪共用一个执行器 |
+| 积分器 / 步长 | implicitfast / 0.001 秒 |
+
+动作依次为落稳、接近、下降、夹紧、抬升、横移、下降、释放、退回。机械臂使用有界阻尼最小二乘 IK 和五次平滑插值，双指沿物体较窄的 X 方向合拢。运行中只写执行器目标，不使用焊接、吸附或逐帧修改物体位姿。
+
+夹爪的 `gripper_opening` 表示标称开度，范围 0–0.1 m；两个滑动关节通过等式约束保持正负半开度，由一个固定腱位置执行器驱动。夹紧目标为零，由物体接触阻止继续闭合。TCP 相对 `link6` 的位置为 `(0, 0, 0.130)`。
+
+| 控制参数 | 设置 |
+| --- | --- |
+| 六轴 Kp | 80, 140, 120, 35, 22, 12 |
+| 六轴 Kv | 5, 8, 7, 2.5, 1.8, 1.2 |
+| 六轴力矩上限（N·m） | 30, 30, 24, 12, 10, 8 |
+| 六轴阻尼 / 摩擦损失 / armature | 各轴 0.12 / 0.04 / 0.005 |
+| 夹爪 Kp / Kv / 力限制 | 400 / 4 / ±10 N |
+| 手指阻尼 / 摩擦损失 / armature | 0.1 / 0 / 0.001 |
+| 重力补偿 | 仅机械臂和夹爪启用，猫仍完整承受重力 |
+
+这是搬运演示，未实现精确放置的反馈控制。释放后允许数厘米滑动，位置验收容差为 **5 cm**；参考 CPU / Warp 测试误差约为 **2.2 / 3.4 cm**。携带阶段物体最低点离桌面至少 8 cm，持续存在双指接触。碰撞代理、控制增益、质量、摩擦和放置角度补偿均为仿真默认值，不代表真机标定参数；修改后应重新验证。
+
+## SDF 与资产准备
+
+猫模型的碰撞几何为原生 `type="sdf"`，由 MuJoCo 编译网格八叉树。脚本设置 `octree_maxdepth=8`，场景使用 `sdf_initpoints=40`、`sdf_iterations=10` 和 `condim=4`。夹爪盒体及桌面盒体直接与物体 SDF 求接触，不使用包围盒或凸包替代物体形状。桌面使用较柔和的接触参数，以缓和落桌冲击。
+
+为兼容网页查看器，物体外观使用同一个完整网格的独立 `mesh` 几何，质量为零且关闭碰撞；透明的 SDF 几何承担物体质量和全部接触求解。机械臂本体使用圆柱、胶囊近似，夹爪沿用参考模型的盒形接触代理，机械臂视觉 STL 不参与碰撞。
+
+原 STL 有 468,114 个三角面，超过 MuJoCo 的 STL 读取上限。OBJ 已随示例提供；仅需重新生成时运行：
+
+```bash
+uv run python contrib/piper_h/prepare_cat.py \
+  --source /home/yangyunchen/Documents/LAN-Share/stl/cat_phone_stand.stl
+```
+
+转换合并完全相同的顶点，保留全部三角面、面朝向和连接关系，不做减面或凸分解。毫米坐标乘以 `0.001`，水平包围盒中心平移到原点，最低点移到 Z=0。`cat_provenance.json` 记录源文件路径、转换前后的 SHA-256、坐标换算、尺寸及面数。运行演示不需要原始 STL。
+
+机械臂资产来自旧项目 `Simulation/src/piper_sim/models`，夹爪来自 `PhysicalEngine`；上游均为 AgileX `agx_arm_urdf`，提交 `f6642ce0d7872c686f29c99e9e10cd23d1d49313`。原始 URDF、哈希和 MIT 许可证保留供核对。URDF 中的 ROS package 路径及部分 DAE 引用不用于运行。猫模型来自用户提供的本地文件，其授权不包含在机械臂的 MIT 许可证中。
+
+## 验证
+
+```bash
+uv run pytest contrib/piper_h/grasp_test.py contrib/piper_h/grasp_viewer_test.py -q
+uv run ruff check contrib/piper_h
+uv run ruff format --check contrib/piper_h
+uv run python contrib/kernel_analyzer/kernel_analyzer/cli.py contrib/piper_h/grasp_warp.py
+```
+
+测试校验机械臂和夹爪资产哈希、桌面和基座位置、关节目标范围、猫模型全部三角面和闭合拓扑、有效八叉树、自由刚体、重力补偿范围及 MJB/NPZ 回放。若原 STL 仍在来源路径，会逐三角形核对转换结果。凹面探针验证真实空隙中没有 SDF 接触，而凸包会错误填充该空隙；表面探针比较 CPU/GPU 的接触距离与法向。
+
+完整 CPU/GPU 搬运验收检查携带高度、双指持续接触、落点、落桌后漂移、有限状态、固定基座、关节和力矩限制及非预期桌面接触。没有 CUDA 时跳过 GPU 测试，`--headless --engine=warp` 则明确报错。
+
+当前查看器可能在首次 CUDA 图执行前于 `Time = 0.0000` 打印惯量矩阵警告；实际步进已通过 CPU/GPU 验证。Warp 对胶囊—圆柱碰撞对还会提示最多生成一个接触点，该提示不影响猫模型的 SDF 接触。
+
+本示例不注册到默认 benchmark，也不修改公共查看器或物理引擎接口。
