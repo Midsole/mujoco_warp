@@ -16,6 +16,9 @@ benchmarks/mujoco_menagerie/
 benchmarks/kitchen/combined_assets/
 kitchen_robot.xml
 
+# Local PiPER H experiment reports and measurement data.
+/contrib/piper_h/results/
+
 # Language-specific files
 # =======================
 
