@@ -17,6 +17,7 @@ import re
 import secrets
 import signal
 import threading
+import time
 import traceback
 import uuid
 from pathlib import Path
@@ -39,6 +40,7 @@ CONTACT_KEYS = (
   "contact_counts",
   "contact_totals",
 )
+WORLD_TRACE_KEYS = ("qpos", "qvel", "force", "contacts", "warnings")
 
 
 def utc_now():
@@ -86,6 +88,57 @@ def write_json(path, value):
   os.replace(temporary, path)
 
 
+def world_directory(directory, world):
+  """Keep world 1 at the legacy path and store other worlds separately."""
+  return directory if world == 1 else directory / "worlds" / f"{world:04d}"
+
+
+def world_trace(trace, nworld, world):
+  """Return one world's states and sampled contact forces without copying the batch."""
+  if nworld == 1:
+    return dict(trace)
+  result = {key: trace[key][world] for key in WORLD_TRACE_KEYS}
+  result["warnings"] = trace["warnings"][world : world + 1]
+  result["contact_steps"] = trace["contact_steps"]
+  result.update({key: trace[key][world] for key in CONTACT_KEYS if key != "contact_steps"})
+  return result
+
+
+def validate_run(model, trajectory, trace, config):
+  """Validate every world, returning the aggregate and individual metrics."""
+  import grasp
+
+  nworld = config["nworld"]
+  worlds = []
+  for world in range(nworld):
+    worlds.append({"world": world + 1, **grasp.validate(model, trajectory, world_trace(trace, nworld, world), config)})
+  passed_count = sum(world["passed"] for world in worlds)
+  metrics = {
+    **worlds[0],
+    "nworld": nworld,
+    "passed_count": passed_count,
+    "pass_fraction": passed_count / nworld,
+    "passed": passed_count == nworld,
+    "worlds": worlds,
+  }
+  return metrics
+
+
+def save_world_traces(directory, trace, nworld):
+  """Save each world's complete state and force replay in its own compressed archives."""
+  import numpy as np
+
+  for world in range(nworld):
+    destination = world_directory(directory, world + 1)
+    destination.mkdir(parents=True, exist_ok=True)
+    replay = world_trace(trace, nworld, world)
+    contact_trace = {key: replay.pop(key) for key in CONTACT_KEYS}
+    for filename, values in (("contact_forces", contact_trace), ("trace", replay)):
+      temporary = destination / f"{filename}.part.npz"
+      np.savez_compressed(temporary, **values)
+      os.replace(temporary, destination / f"{filename}.npz")
+
+
 def run_worker(root, run_id):
   """Simulate one experiment and save its physical states in a separate process."""
   run_dir = Path(root) / run_id
@@ -105,9 +158,8 @@ def run_worker(root, run_id):
       try:
         os.environ.setdefault("MUJOCO_GL", "egl")
         import grasp
-        import numpy as np
 
-        config = read_json(run_dir / "config.json")
+        config = validate_config(read_json(run_dir / "config.json"))
         stage(1, state="running")
         model = grasp.build_model(config)
         stage(2)
@@ -117,12 +169,14 @@ def run_worker(root, run_id):
           update(sim_time=round(sim_time, 2))
 
         stage(3, sim_time=0)
+        simulation_started = time.perf_counter()
         if config["engine"] == "warp":
           from grasp_warp import rollout_warp
 
           trace = rollout_warp(
             model,
             trajectory,
+            nworld=config["nworld"],
             nconmax=config["nconmax"],
             njmax=config["njmax"],
             progress=progress,
@@ -130,18 +184,22 @@ def run_worker(root, run_id):
           )
         else:
           trace = grasp.rollout_cpu(model, trajectory, progress=progress, record_contact_forces=True)
+        simulation_seconds = time.perf_counter() - simulation_started
         stage(4, sim_time=24)
-        metrics = grasp.validate(model, trajectory, trace, config)
+        metrics = validate_run(model, trajectory, trace, config)
+        metrics["simulation_seconds"] = simulation_seconds
+        metrics["world_steps_per_second"] = config["nworld"] * len(trajectory["ctrl"]) / simulation_seconds
         write_json(run_dir / "metrics.json", metrics)
-        contact_trace = {key: trace.pop(key) for key in CONTACT_KEYS}
-        temporary_contacts = run_dir / "contact_forces.part.npz"
-        np.savez_compressed(temporary_contacts, **contact_trace)
-        os.replace(temporary_contacts, run_dir / "contact_forces.npz")
-        temporary_trace = run_dir / "trace.part.npz"
-        np.savez_compressed(temporary_trace, **trace)
-        os.replace(temporary_trace, run_dir / "trace.npz")
+        save_world_traces(run_dir, trace, config["nworld"])
         finish_active_step(status)
-        update(state="completed", phase="完成", sim_time=24, passed=metrics["passed"])
+        update(
+          state="completed",
+          phase="完成",
+          sim_time=24,
+          passed=metrics["passed"],
+          passed_count=metrics["passed_count"],
+          replay_worlds=config["nworld"],
+        )
       except Exception as exc:
         traceback.print_exc()
         finish_active_step(status, "failed")
@@ -161,7 +219,7 @@ def replay_settings(query):
     "force_scale": (0.005, 2),
   }
   defaults = {"time": 0, "azimuth": 140, "elevation": -25, "distance": 3.3, "x": 0, "y": 0, "z": 0.75, "force_scale": 0.3}
-  if set(query) - (set(ranges) | {"width", "contact_forces"}):
+  if set(query) - (set(ranges) | {"width", "contact_forces", "world"}):
     raise ValueError("未知的回放参数")
   settings = {}
   for key, (low, high) in ranges.items():
@@ -177,6 +235,10 @@ def replay_settings(query):
   if len(show_forces) != 1 or show_forces[0] not in ("0", "1"):
     raise ValueError("接触力显示参数无效")
   settings["contact_forces"] = show_forces[0] == "1"
+  world = query.get("world", ["1"])
+  if len(world) != 1 or not str(world[0]).isdigit() or not 1 <= int(world[0]) <= 256:
+    raise ValueError("回放场景无效")
+  settings["world"] = int(world[0])
   return settings
 
 
@@ -224,19 +286,11 @@ class ReplayRenderer:
           # Replay uses recorded qpos/qvel, so contact resolution cannot change motion.
           # Keep the same visible meshes while avoiding a slow deep SDF rebuild.
           model = grasp.build_model({**config, "sdf_depth": 5})
-          with np.load(directory / "trace.npz") as saved:
-            qpos, qvel = saved["qpos"], saved["qvel"]
-          contact_path = directory / "contact_forces.npz"
-          contact_trace = None
-          if contact_path.exists():
-            with np.load(contact_path) as saved:
-              contact_trace = {key: saved[key] for key in CONTACT_KEYS}
           cached[run_id] = {
             "model": model,
             "data": mujoco.MjData(model),
-            "qpos": qpos,
-            "qvel": qvel,
-            "contact_trace": contact_trace,
+            "worlds": {},
+            "nworld": config.get("nworld", 1),
             "renderer": None,
             "width": None,
           }
@@ -246,6 +300,24 @@ class ReplayRenderer:
               cached[oldest]["renderer"].close()
             del cached[oldest]
         item = cached[run_id]
+        world = settings["world"]
+        if not 1 <= world <= item["nworld"]:
+          raise ValueError("回放场景超出本轮场景数")
+        if world not in item["worlds"]:
+          directory = world_directory(self.root / run_id, world)
+          if not (directory / "trace.npz").exists():
+            raise ValueError("这个场景没有保存运动轨迹，请重新运行仿真")
+          with np.load(directory / "trace.npz") as saved:
+            states = {key: saved[key] for key in ("qpos", "qvel")}
+          contact_path = directory / "contact_forces.npz"
+          states["contact_trace"] = None
+          if contact_path.exists():
+            with np.load(contact_path) as saved:
+              states["contact_trace"] = {key: saved[key] for key in CONTACT_KEYS}
+          item["worlds"][world] = states
+          if len(item["worlds"]) > 2:
+            del item["worlds"][next(iter(item["worlds"]))]
+        states = item["worlds"][world]
         model, data = item["model"], item["data"]
         width = settings["width"]
         if item["width"] != width:
@@ -255,9 +327,9 @@ class ReplayRenderer:
           model.vis.global_.offheight = width * 3 // 4
           item["renderer"] = mujoco.Renderer(model, width=width, height=width * 3 // 4)
           item["width"] = width
-        step = min(round(settings["time"] / model.opt.timestep), len(item["qpos"]) - 1)
-        data.qpos[:] = item["qpos"][step]
-        data.qvel[:] = item["qvel"][step]
+        step = min(round(settings["time"] / model.opt.timestep), len(states["qpos"]) - 1)
+        data.qpos[:] = states["qpos"][step]
+        data.qvel[:] = states["qvel"][step]
         data.time = step * model.opt.timestep
         mujoco.mj_forward(model, data)
         camera = mujoco.MjvCamera()
@@ -269,7 +341,7 @@ class ReplayRenderer:
         item["renderer"].update_scene(data, camera=camera)
         info = {}
         if settings["contact_forces"]:
-          force_trace = item["contact_trace"]
+          force_trace = states["contact_trace"]
           if force_trace is None:
             raise ValueError("这轮历史运行没有保存接触力，请重新运行仿真")
           sample = int(np.argmin(np.abs(force_trace["contact_steps"] - step)))
@@ -340,6 +412,7 @@ class RunManager:
     if (directory / "metrics.json").exists():
       run["metrics"] = read_json(directory / "metrics.json")
     run["replay_ready"] = (directory / "trace.npz").exists()
+    run["replay_worlds"] = run.get("replay_worlds", 1 if run["replay_ready"] else 0)
     run["contact_forces_ready"] = (directory / "contact_forces.npz").exists()
     run["video_ready"] = (directory / "video.mp4").exists()
     return run
@@ -361,6 +434,7 @@ class RunManager:
           "state": "queued",
           "phase": "正在提交配置",
           "engine": config["engine"],
+          "nworld": config["nworld"],
           "sim_time": 0,
           "steps": new_steps(created_at),
         },
@@ -380,7 +454,7 @@ class RunManager:
         finish_active_step(status, "failed")
         error = f"仿真进程异常退出（代码 {process.exitcode}）"
         if process.exitcode == -signal.SIGKILL:
-          error = "仿真进程被系统终止，可能是模型编译占用内存过高。请降低 SDF 深度后重试。"
+          error = "仿真进程被系统终止，可能是内存不足。请降低并行场景数或 SDF 深度后重试。"
         status.update(state="failed", phase="失败", error=error)
         write_json(path, status)
       if self.active is process:
@@ -473,6 +547,8 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
           return
         try:
           settings = replay_settings(parse_qs(urlparse(self.path).query))
+          if settings["world"] > run["replay_worlds"]:
+            raise ValueError("这个场景没有保存运动轨迹，请重新运行仿真")
           frame, info = self.server.replay.render(run_id, settings)
           self._send(200, frame, "image/jpeg", headers=info)
         except ValueError as exc:

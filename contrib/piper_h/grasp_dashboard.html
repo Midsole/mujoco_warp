@@ -87,6 +87,12 @@
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 9px 7px; border-bottom: 1px solid #2c455b; text-align: left; }
     th { color: #a9c9e2; }
+    tr[data-world].selected { background: #193c53; }
+    tr[data-world]:hover { background: #173247; }
+    tr[data-world] { cursor: pointer; }
+    .world-results { max-height: 390px; overflow: auto; }
+    .world-results table { white-space: nowrap; }
+    .world-results th { position: sticky; top: 0; background: #102032; z-index: 1; }
     .scroll { overflow-x: auto; }
     @media (max-width: 940px) { main { grid-template-columns: 1fr; } .controls { position: static; max-height: none; } }
   </style>
@@ -99,6 +105,7 @@
       <label for="engine">物理后端</label>
       <select id="engine"><option value="warp">Warp GPU</option><option value="c">MuJoCo CPU</option></select>
       <div id="field-groups"></div>
+      <p class="muted" id="batch-notice" role="status" aria-live="polite"></p>
       <p class="notice" id="contact-time-notice" role="status" aria-live="polite"></p>
       <p class="muted">动作轨迹保持当前 24 秒基线。猫与桌面接触采用桌面系数，猫与夹爪接触采用猫的系数。验收标准只影响通过判定，不改变仿真运动。</p>
       <div class="toolbar"><button class="primary" id="start">开始仿真</button><button id="reset">恢复默认值</button></div>
@@ -116,6 +123,7 @@
       <section>
         <h2>物理结果与验收</h2><div id="result-summary" class="muted">运行结束后显示结果。</div>
         <div class="metrics" id="metrics"></div>
+        <div class="scroll" id="batch-results"></div>
         <h3>本轮验收标准</h3><div id="thresholds" class="muted">运行结束后显示所用阈值。</div>
         <h3>两轮对照</h3><div class="scroll" id="comparison" class="muted">在历史记录里选择一轮作为对照。</div>
       </section>
@@ -133,6 +141,7 @@
       cat_rolling_friction: 6, table_rolling_friction: 6,
     };
     let defaults = {}, selectedId = null, compareId = null, selectedRun = null, compareRun = null, replayKey = '';
+    let selectedWorld = 1;
     const $ = (id) => document.getElementById(id);
     const escapeHtml = (value) => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     async function api(url, options = {}) {
@@ -192,6 +201,10 @@
             box.append(guide);
             container.querySelector('select').addEventListener('change', updateCondimGuide);
           }
+          if (field.key === 'nworld') {
+            container.querySelector('select').addEventListener('change', updateBatchGuide);
+            box.append($('batch-notice'));
+          }
           if (field.key in frictionDimensions) {
             const status = document.createElement('small'); status.className = 'friction-status';
             status.dataset.minCondim = frictionDimensions[field.key]; box.append(status);
@@ -209,7 +222,18 @@
       }
       updateCondimGuide();
       updateContactTimeGuide();
+      updateBatchGuide();
     }
+    function updateBatchGuide() {
+      const select = document.querySelector('select[data-key="nworld"]');
+      if (!select) return;
+      const cpu = $('engine').value === 'c';
+      if (cpu) select.value = '1';
+      select.disabled = cpu;
+      $('batch-notice').textContent = cpu ? 'MuJoCo CPU 运行 1 个场景；选择 Warp GPU 可启用批量仿真。' :
+        `Warp GPU 将并行运行 ${select.value} 个独立场景，使用相同参数、初始状态和动作轨迹；保存每个场景的轨迹，在逐场景验收结果中点击即可回看。`;
+    }
+    $('engine').onchange = updateBatchGuide;
     function updateContactTimeGuide() {
       const timestepInput = document.querySelector('input[data-key="timestep"]');
       const timestep = Number(timestepInput.value);
@@ -269,6 +293,7 @@
       }
       updateCondimGuide();
       updateContactTimeGuide();
+      updateBatchGuide();
       $('form-message').textContent = '已恢复默认值';
     };
     $('start').onclick = async () => {
@@ -276,7 +301,7 @@
         $('form-message').textContent = '';
         const config = readForm();
         const run = await api('/api/runs', {method:'POST', body:JSON.stringify(config)});
-        selectedId = run.id; compareId = null; compareRun = null;
+        selectedId = run.id; selectedWorld = 1; compareId = null; compareRun = null;
         await refresh();
       } catch (error) { $('form-message').textContent = error.message; $('form-message').className = 'error'; }
     };
@@ -314,9 +339,11 @@
         row.append(name, detail); host.append(row);
       });
     }
-    function replayBox(run, title) {
+    function replayBox(run, title, world = 1) {
       const wrap = document.createElement('div'); wrap.className = 'replay-box';
-      const text = document.createElement('p'); text.textContent = `${title} · ${run.engine.toUpperCase()} · ${run.id.slice(0, 8)}`;
+      wrap.dataset.runId = run.id;
+      const text = document.createElement('p'); text.textContent = `${title} · ${run.engine.toUpperCase()} · ${run.id.slice(0, 8)}` +
+        ((run.config.nworld || 1) > 1 ? ` · 第 ${world} / ${run.config.nworld} 个场景` : '');
       wrap.append(text);
       const image = document.createElement('img'); image.className = 'replay-view'; image.alt = `${title} MuJoCo 状态回放`;
       image.draggable = false; wrap.append(image);
@@ -356,12 +383,13 @@
       wrap.append(legend);
       const message = document.createElement('small'); message.setAttribute('role', 'status');
       message.textContent = '正在准备回放…'; wrap.append(message);
-      const view = {time: 0, azimuth: 140, elevation: -25, distance: 3.3, x: 0, y: 0, z: 0.75};
+      const view = {world, time: 0, azimuth: 140, elevation: -25, distance: 3.3, x: 0, y: 0, z: 0.75};
       let playing = false, busy = false, dirty = false, lastTick = 0, imageUrl = null, removed = false;
       function draw() {
         if (busy) { dirty = true; return; }
         busy = true; dirty = false;
         const forceEnabled = showForces.checked;
+        const requestWorld = view.world;
         const query = new URLSearchParams({...view, width: quality.value,
           contact_forces: forceEnabled ? '1' : '0', force_scale: forceScale.value});
         fetch(`/api/runs/${run.id}/frame?${query}`).then(async response => {
@@ -373,7 +401,7 @@
             time: response.headers.get('X-Contact-Sample-Time'),
           } : null;
           const blob = await response.blob();
-          if (removed) return;
+          if (removed || requestWorld !== view.world) return;
           const nextUrl = URL.createObjectURL(blob);
           image.src = nextUrl;
           if (imageUrl) URL.revokeObjectURL(imageUrl);
@@ -381,7 +409,7 @@
           message.textContent = forceInfo ? `接触点 ${forceInfo.count} 个 · 最大单点合力 ${Number(forceInfo.max).toFixed(3)} N` +
             ` · 采样时刻 ${forceInfo.time} s${Number(forceInfo.omitted) ? ` · 另有 ${forceInfo.omitted} 个未画出` : ''}` : '';
           play.disabled = false;
-        }).catch(error => { if (!removed) message.textContent = error.message; }).finally(() => {
+        }).catch(error => { if (!removed && requestWorld === view.world) message.textContent = error.message; }).finally(() => {
           busy = false;
           if (dirty && !removed) draw();
         });
@@ -403,6 +431,15 @@
         if (view.time >= 24) setTime(0);
         playing = !playing; play.textContent = playing ? '暂停' : '播放'; lastTick = 0;
         if (playing) requestAnimationFrame(tick);
+      };
+      wrap.selectWorld = world => {
+        if (world === view.world) return;
+        view.world = world;
+        playing = false; play.textContent = '播放'; play.disabled = true; lastTick = 0;
+        text.textContent = `${title} · ${run.engine.toUpperCase()} · ${run.id.slice(0, 8)} · 第 ${world} / ${run.config.nworld || 1} 个场景`;
+        image.alt = `${title} 第 ${world} 个场景 MuJoCo 状态回放`;
+        image.removeAttribute('src'); message.textContent = `正在加载第 ${world} 个场景…`;
+        draw();
       };
       timeline.oninput = () => setTime(Number(timeline.value));
       quality.onchange = draw;
@@ -436,7 +473,7 @@
     function renderResults() {
       const run = selectedRun;
       $('state').textContent = run ? ({queued:'等待启动',running:'运行中',completed:'已完成',failed:'失败',canceled:'已取消'}[run.state] || run.state) : '尚未运行';
-      $('progress').textContent = run ? `${run.phase} · 仿真 ${format(run.sim_time || 0)} / 24 秒` : '从左侧选择参数并开始运行。';
+      $('progress').textContent = run ? `${run.phase} · ${run.config.nworld || 1} 个场景 · 每场景仿真 ${format(run.sim_time || 0)} / 24 秒` : '从左侧选择参数并开始运行。';
       renderSteps(run);
       $('run-error').textContent = run?.error || '';
       $('cancel').hidden = !run || !['queued','running'].includes(run.state);
@@ -447,27 +484,74 @@
         replayKey = nextReplayKey;
         for (const item of replays.children) item.dispose();
         replays.replaceChildren();
-        if (run?.replay_ready) replays.append(replayBox(run, '当前运行'));
+        if (run?.replay_ready) replays.append(replayBox(run, '当前运行', selectedWorld));
         if (compareRun?.replay_ready) replays.append(replayBox(compareRun, '对照运行'));
       }
+      const currentReplay = [...replays.children].find(box => box.dataset.runId === run?.id);
+      if (currentReplay) currentReplay.selectWorld(selectedWorld);
       const result = run?.metrics;
-      $('result-summary').textContent = result ? (result.passed ? '验收通过' : '验收未通过；下方仍显示实际物理结果') : '运行结束后显示结果。';
+      const sceneResult = result?.worlds?.find(world => world.world === selectedWorld) || result;
+      $('result-summary').textContent = result ? (result.nworld > 1 ?
+        `整批${result.passed ? '验收通过' : '验收未通过'} · ${result.passed_count} / ${result.nworld} 个场景通过（${(result.pass_fraction * 100).toFixed(1)}%）。当前回看第 ${selectedWorld} 个场景：${sceneResult.passed ? '验收通过' : '验收未通过'}。` :
+        (result.passed ? '验收通过' : '验收未通过；下方仍显示实际物理结果')) : '运行结束后显示结果。';
       $('result-summary').className = result?.passed ? 'success' : result ? 'error' : 'muted';
       $('metrics').replaceChildren();
       if (result) for (const [key, label, unit] of metricNames) {
         const tile = document.createElement('div'); tile.className = 'metric';
         const caption = document.createElement('span'); caption.textContent = label;
-        const value = document.createElement('strong'); value.textContent = `${format(result[key])}${unit ? ` ${unit}` : ''}`;
+        const value = document.createElement('strong'); value.textContent = `${format(sceneResult[key])}${unit ? ` ${unit}` : ''}`;
         tile.append(caption, value); $('metrics').append(tile);
       }
+      const batchResults = $('batch-results');
+      const batchKey = result ? `${run.id}:${run.replay_worlds || 0}` : '';
+      if (batchResults.dataset.runId !== batchKey) {
+        batchResults.dataset.runId = batchKey;
+        batchResults.replaceChildren();
+        if (result?.nworld > 1) {
+          const details = document.createElement('details');
+          const summary = document.createElement('summary'); summary.textContent = '逐场景验收结果'; details.append(summary);
+          const hint = document.createElement('p'); hint.className = 'muted';
+          hint.textContent = '点击结果行或“回看”，切换该场景的画面和指标；保留当前时间点与视角。'; details.append(hint);
+          const table = document.createElement('table');
+          const rows = result.worlds.map(world => `<tr data-world="${world.world}"><td>${world.world} ` +
+            `<button aria-label="回看场景 ${world.world}" ${world.world > (run.replay_worlds || 1) ? 'disabled' : ''}>回看</button></td>` +
+            `<td>${world.passed ? '通过' : '未通过'}</td>` +
+            `<td>${format(world.minimum_carried_height_m)}</td><td>${format(world.placement_error_m)}</td>` +
+            `<td>${format(world.carried_contact_fraction)}</td><td>${format(world.final_drift_m)}</td>` +
+            `<td>${format(world.final_speed)}</td><td>${format(world.joint_limit_error)}</td></tr>`).join('');
+          table.innerHTML = `<thead><tr><th>场景 / 回放</th><th>验收</th><th>携带高度 (m)</th><th>放置误差 (m)</th><th>双指接触比例</th><th>最终漂移 (m)</th><th>最终最大速度</th><th>关节限位误差</th></tr></thead><tbody>${rows}</tbody>`;
+          table.onclick = event => {
+            const row = event.target.closest('tr[data-world]');
+            if (!row || row.querySelector('button').disabled) return;
+            selectedWorld = Number(row.dataset.world);
+            renderResults();
+            const replay = [...$('replays').children].find(box => box.dataset.runId === selectedId);
+            replay?.scrollIntoView({behavior:'smooth', block:'start'});
+          };
+          const tableBox = document.createElement('div'); tableBox.className = 'world-results'; tableBox.append(table);
+          details.append(tableBox); batchResults.append(details);
+        }
+        if (result?.simulation_seconds !== undefined) {
+          const timing = document.createElement('p'); timing.className = 'muted';
+          timing.textContent = `仿真耗时 ${result.simulation_seconds.toFixed(2)} 秒 · 总吞吐 ${format(result.world_steps_per_second)} 场景步/秒（含本轮初始化、内核准备和状态记录）`;
+          batchResults.append(timing);
+        }
+      }
+      batchResults.querySelectorAll('tr[data-world]').forEach(row => {
+        const active = Number(row.dataset.world) === selectedWorld;
+        row.classList.toggle('selected', active);
+        const button = row.querySelector('button');
+        button.setAttribute('aria-pressed', String(active));
+        button.textContent = active ? '正在回看' : button.disabled ? '未保存轨迹' : '回看';
+      });
       const thresholdKeys = ['minimum_carried_height','placement_tolerance','minimum_contact_fraction','maximum_final_drift'];
       $('thresholds').textContent = run?.config ? thresholdKeys.map(key =>
         `${fields.get(key).label}：${format(run.config[key])}`).join(' · ') : '运行结束后显示所用阈值。';
       const comparison = $('comparison');
       if (!result || !compareRun?.metrics) { comparison.textContent = '在历史记录里选择一轮作为对照。'; return; }
-      const changed = [...fields.keys()].filter(key => JSON.stringify(run.config[key]) !== JSON.stringify(compareRun.config[key]));
-      const rows = metricNames.map(([key,label,unit]) => `<tr><td>${escapeHtml(label)}</td><td>${format(result[key])} ${unit}</td><td>${format(compareRun.metrics[key])} ${unit}</td></tr>`).join('');
-      comparison.innerHTML = `<p>参数差异：${changed.length} 项${changed.length ? `（${changed.map(key => escapeHtml(fields.get(key).label)).join('、')}）` : ''}</p><table><thead><tr><th>指标</th><th>当前</th><th>对照</th></tr></thead><tbody>${rows}</tbody></table>`;
+      const changed = [...fields.keys()].filter(key => JSON.stringify(run.config[key] ?? defaults[key]) !== JSON.stringify(compareRun.config[key] ?? defaults[key]));
+      const rows = metricNames.map(([key,label,unit]) => `<tr><td>${escapeHtml(label)}</td><td>${format(sceneResult[key])} ${unit}</td><td>${format(compareRun.metrics[key])} ${unit}</td></tr>`).join('');
+      comparison.innerHTML = `<p>${run.engine.toUpperCase()} / ${run.config.nworld || 1} 个场景（当前第 ${selectedWorld} 个）vs ${compareRun.engine.toUpperCase()} / ${compareRun.config.nworld || 1} 个场景（对照第 1 个）。</p><p>参数差异：${changed.length} 项${changed.length ? `（${changed.map(key => escapeHtml(fields.get(key).label)).join('、')}）` : ''}</p><table><thead><tr><th>指标</th><th>当前</th><th>对照</th></tr></thead><tbody>${rows}</tbody></table>`;
     }
     function renderHistory(runs) {
       const host = $('history'); host.replaceChildren();
@@ -475,15 +559,16 @@
       for (const run of runs) {
         const row = document.createElement('div'); row.className = 'run';
         const top = document.createElement('div'); top.className = 'row';
-        const label = document.createElement('strong'); label.textContent = `${run.engine.toUpperCase()} · ${run.id.slice(0, 8)}`;
+        const label = document.createElement('strong'); label.textContent = `${run.engine.toUpperCase()} · ${run.nworld || 1} 个场景 · ${run.id.slice(0, 8)}`;
         const status = document.createElement('span'); status.className = 'badge';
-        status.textContent = run.state === 'completed' ? (run.passed ? '通过' : '未通过') : run.state;
+        status.textContent = run.state === 'completed' ? (run.passed ? '通过' : '未通过') +
+          (run.passed_count !== undefined ? ` ${run.passed_count}/${run.nworld || 1}` : '') : run.state;
         top.append(label, status); row.append(top);
         const date = document.createElement('small'); date.textContent = new Date(run.created_at).toLocaleString(); row.append(date);
         const buttons = document.createElement('div'); buttons.className = 'toolbar';
         const select = document.createElement('button'); select.textContent = '查看';
         select.onclick = async () => {
-          selectedId = run.id;
+          selectedId = run.id; selectedWorld = 1;
           if (compareId === selectedId) { compareId = null; compareRun = null; }
           selectedRun = await api(`/api/runs/${run.id}`);
           renderResults(); renderHistory(runs);

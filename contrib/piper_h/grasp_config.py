@@ -3,6 +3,16 @@
 import math
 
 FIELDS = [
+  {
+    "key": "nworld",
+    "label": "并行仿真场景数",
+    "group": "批量仿真",
+    "default": 1,
+    "min": 1,
+    "max": 256,
+    "integer": True,
+    "choices": [1, 16, 32, 64, 128, 256],
+  },
   {"key": "cat_mass", "label": "物体质量 (kg)", "group": "物体与接触", "default": 0.1, "min": 0.005, "max": 2},
   {
     "key": "condim",
@@ -116,4 +126,6 @@ def validate_config(raw):
         raise ValueError(f"{key} 必须是有限数值")
       checked.append(item)
     result[key] = checked if isinstance(field["default"], list) else checked[0]
+  if engine == "c" and result["nworld"] != 1:
+    raise ValueError("批量仿真需要 Warp GPU 后端；MuJoCo CPU 仅支持 1 个场景")
   return result

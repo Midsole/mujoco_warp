@@ -29,6 +29,11 @@ def test_config_validation():
     {"condim": 5},
     {"cat_torsional_friction": -0.1},
     {"table_rolling_friction": 4},
+    {"nworld": 0},
+    {"nworld": 32.0},
+    {"nworld": True},
+    {"nworld": 512},
+    {"engine": "c", "nworld": 16},
   ):
     with pytest.raises(ValueError):
       validate_config(invalid)
@@ -38,6 +43,9 @@ def test_config_validation():
   assert validate_config({})["cat_torsional_friction"] == 0.005
   assert validate_config({})["table_rolling_friction"] == 0.0001
   assert validate_config({"condim": 3})["condim"] == 3
+  assert validate_config({})["nworld"] == 1
+  for nworld in (16, 32, 64, 128, 256):
+    assert validate_config({"engine": "warp", "nworld": nworld})["nworld"] == nworld
 
 
 def test_model_overrides():
@@ -202,7 +210,17 @@ def test_authenticated_api_busy_cancel_and_history(tmp_path, monkeypatch):
     assert response.status == 200 and response.read() == b"jpeg-data"
     status, _, _ = request("GET", f"/api/runs/{run_id}/frame?width=500", headers=headers)
     assert status == 400
+    status, _, _ = request("GET", f"/api/runs/{run_id}/frame?world=2", headers=headers)
+    assert status == 400
     assert grasp_dashboard.RunManager(tmp_path).list_runs()[0]["id"] == run_id
+    status, _, _ = request("POST", "/api/runs", {"engine": "c", "nworld": 16}, headers)
+    assert status == 400
+    status, batch, _ = request("POST", "/api/runs", {"engine": "warp", "nworld": 128}, headers)
+    assert status == 202
+    status, batch, _ = request("GET", f"/api/runs/{batch['id']}", headers=headers)
+    assert status == 200 and batch["nworld"] == 128 and batch["config"]["nworld"] == 128
+    status, history, _ = request("GET", "/api/runs", headers=headers)
+    assert status == 200 and history[0]["nworld"] == 128
   finally:
     connection.close()
     manager.stop()
@@ -229,7 +247,7 @@ def test_replay_renders_saved_state(tmp_path, monkeypatch):
   run_id = "a" * 32
   directory = tmp_path / run_id
   directory.mkdir()
-  grasp_dashboard.write_json(directory / "config.json", {"sdf_depth": 10})
+  grasp_dashboard.write_json(directory / "config.json", {"sdf_depth": 10, "nworld": 16})
   np.savez_compressed(directory / "trace.npz", qpos=np.array([[0.0], [0.5]]), qvel=np.zeros((2, 1)))
   np.savez_compressed(
     directory / "contact_forces.npz",
@@ -253,7 +271,25 @@ def test_replay_renders_saved_state(tmp_path, monkeypatch):
   second, _ = replay.render(run_id, settings)
   assert Image.open(io.BytesIO(first)).size == (640, 480)
   assert first != second
-  assert model_configs == [{"sdf_depth": 5}]
+  assert model_configs == [{"sdf_depth": 5, "nworld": 16}]
+  other_world = grasp_dashboard.world_directory(directory, 16)
+  other_world.mkdir(parents=True)
+  np.savez_compressed(other_world / "trace.npz", qpos=np.array([[-0.5], [-1.0]]), qvel=np.zeros((2, 1)))
+  with np.load(directory / "contact_forces.npz") as saved:
+    forces = {key: saved[key] for key in grasp_dashboard.CONTACT_KEYS}
+  forces["contact_forces"] *= 2
+  np.savez_compressed(other_world / "contact_forces.npz", **forces)
+  settings["world"] = 16
+  settings["contact_forces"] = True
+  other_frame, info = replay.render(run_id, settings)
+  assert other_frame != second and info["X-Contact-Max-N"] == "2.0000"
+  settings["world"] = 2
+  with pytest.raises(ValueError, match="没有保存运动轨迹"):
+    replay.render(run_id, settings)
+  settings["world"] = 17
+  with pytest.raises(ValueError, match="超出本轮"):
+    replay.render(run_id, settings)
+  settings["world"] = 1
   legacy = tmp_path / ("b" * 32)
   legacy.mkdir()
   grasp_dashboard.write_json(legacy / "config.json", {"sdf_depth": 8})
@@ -269,6 +305,10 @@ def test_contact_force_settings_validation():
   for query in ({"contact_forces": ["true"]}, {"force_scale": ["0"]}, {"force_scale": ["nan"]}):
     with pytest.raises(ValueError):
       grasp_dashboard.replay_settings(query)
+  assert grasp_dashboard.replay_settings({"world": ["256"]})["world"] == 256
+  for world in (["0"], ["257"], ["1.5"], ["1", "2"]):
+    with pytest.raises(ValueError):
+      grasp_dashboard.replay_settings({"world": world})
 
 
 @pytest.mark.parametrize("engine", ["c", "warp"])
@@ -297,42 +337,120 @@ def test_contact_force_trace_from_real_steps(engine):
   assert np.max(trace["contact_forces"][-1, :, 2]) > 0
 
 
-def test_worker_saves_state_without_encoding_video(tmp_path, monkeypatch):
+@pytest.mark.parametrize("nworld", [16, 32, 128, 256])
+def test_warp_batch_records_independent_worlds(nworld):
+  import warp as wp
+  from grasp_warp import rollout_warp
+
+  if not wp.is_cuda_available():
+    pytest.skip("CUDA unavailable")
+  model = grasp.build_model({"sdf_depth": 5})
+  controls = np.tile(model.key_ctrl[0], (30, 1))
+  controls[:, 0] += np.linspace(0, 0.03, len(controls))
+  trajectory = {"qpos": model.key_qpos[:1].copy(), "qvel": np.zeros((1, model.nv)), "ctrl": controls}
+  single = rollout_warp(model, trajectory, record_contact_forces=True)
+  batch = rollout_warp(model, trajectory, nworld=nworld, record_contact_forces=True)
+  assert batch["qpos"].shape == (nworld, 30, model.nq)
+  assert batch["qvel"].shape == (nworld, 30, model.nv)
+  assert batch["force"].shape == (nworld, 30, model.nu)
+  assert batch["contacts"].shape == (nworld, 30, 4)
+  assert batch["warnings"].shape == (nworld,) and not np.any(batch["warnings"])
+  for world in range(nworld):
+    free = model.joint("cat_free").qposadr[0]
+    np.testing.assert_allclose(batch["qpos"][world, :, :free], single["qpos"][:, :free], atol=1e-6)
+    np.testing.assert_allclose(batch["qpos"][world, :, free : free + 3], single["qpos"][:, free : free + 3], atol=1e-5)
+    # Shared contact ordering can slightly change the settled object's rotation.
+    np.testing.assert_allclose(batch["qpos"][world, :, free + 3 :], single["qpos"][:, free + 3 :], atol=1e-3)
+    assert np.all(batch["contacts"][world, 20:, 2] > 0)
+  # Every world's force replay must agree with its own counts in the shared buffer.
+  np.testing.assert_array_equal(batch["contact_totals"], batch["contacts"][:, batch["contact_steps"], :3].sum(axis=2))
+  np.testing.assert_array_equal(batch["contact_counts"], batch["contact_totals"])
+  assert np.all(batch["contact_counts"][:, -1] > 0)
+  assert np.all(batch["contact_forces"][:, -1, :, 2].max(axis=1) > 0)
+
+
+@pytest.mark.parametrize("engine,nworld", [("c", 1), ("warp", 256)])
+def test_worker_saves_state_without_encoding_video(tmp_path, monkeypatch, engine, nworld):
   run_id = "b" * 32
   directory = tmp_path / run_id
   directory.mkdir()
-  grasp_dashboard.write_json(directory / "config.json", {"engine": "c"})
+  grasp_dashboard.write_json(directory / "config.json", {"engine": engine, "nworld": nworld})
   started_at = grasp_dashboard.utc_now().isoformat()
   grasp_dashboard.write_json(
     directory / "status.json", {"id": run_id, "state": "queued", "steps": grasp_dashboard.new_steps(started_at)}
   )
   monkeypatch.setattr(grasp, "build_model", lambda config: object())
-  monkeypatch.setattr(grasp, "make_trajectory", lambda model: {})
+  monkeypatch.setattr(grasp, "make_trajectory", lambda model: {"ctrl": np.zeros((2, 1))})
 
-  def rollout(model, trajectory, progress, record_contact_forces):
+  def rollout(model, trajectory, progress, record_contact_forces, **settings):
     assert record_contact_forces
+    if engine == "warp":
+      assert settings["nworld"] == nworld
+    shape = (2, 1) if nworld == 1 else (nworld, 2, 1)
+    states = np.ones(shape) if nworld == 1 else np.broadcast_to(np.arange(1, nworld + 1)[:, None, None], shape)
+    force_shape = (1, 1, 3) if nworld == 1 else (nworld, 1, 1, 3)
+    count_shape = (1,) if nworld == 1 else (nworld, 1)
     return {
-      "qpos": np.ones((2, 1)),
+      **{key: states for key in grasp_dashboard.WORLD_TRACE_KEYS},
+      "warnings": np.zeros(nworld, dtype=int),
       "contact_steps": np.array([0]),
-      "contact_positions": np.zeros((1, 1, 3)),
-      "contact_forces": np.zeros((1, 1, 3)),
-      "contact_groups": np.zeros((1, 1)),
-      "contact_counts": np.zeros(1),
-      "contact_totals": np.zeros(1),
+      "contact_positions": np.zeros(force_shape),
+      "contact_forces": np.zeros(force_shape),
+      "contact_groups": np.zeros(force_shape[:-1]),
+      "contact_counts": np.zeros(count_shape),
+      "contact_totals": np.zeros(count_shape),
     }
 
-  monkeypatch.setattr(grasp, "rollout_cpu", rollout)
+  if engine == "c":
+    monkeypatch.setattr(grasp, "rollout_cpu", rollout)
+  else:
+    import grasp_warp
+
+    monkeypatch.setattr(grasp_warp, "rollout_warp", rollout)
   monkeypatch.setattr(grasp, "validate", lambda model, trajectory, trace, config: {"passed": True})
   grasp_dashboard.run_worker(tmp_path, run_id)
   status = grasp_dashboard.read_json(directory / "status.json")
   assert status["state"] == "completed"
+  assert status["passed_count"] == nworld
+  assert status["replay_worlds"] == nworld
+  metrics = grasp_dashboard.read_json(directory / "metrics.json")
+  assert metrics["nworld"] == nworld and len(metrics["worlds"]) == nworld
   assert len(status["steps"]) == 5
   assert all(step["state"] == "completed" and step["duration_seconds"] >= 0 for step in status["steps"])
   with np.load(directory / "trace.npz") as saved:
     np.testing.assert_array_equal(saved["qpos"], np.ones((2, 1)))
   with np.load(directory / "contact_forces.npz") as saved:
     assert set(saved.files) == set(grasp_dashboard.CONTACT_KEYS)
+  for world in range(1, nworld + 1):
+    destination = grasp_dashboard.world_directory(directory, world)
+    with np.load(destination / "trace.npz") as saved:
+      np.testing.assert_array_equal(saved["qpos"], np.full((2, 1), world))
+    with np.load(destination / "contact_forces.npz") as saved:
+      assert saved["contact_positions"].shape == (1, 1, 3)
   assert not (directory / "video.mp4").exists()
+
+
+def test_batch_validation_checks_every_world(monkeypatch):
+  trace = {key: np.arange(16).reshape(16, 1, 1) for key in grasp_dashboard.WORLD_TRACE_KEYS}
+  trace["warnings"] = np.zeros(16, dtype=int)
+  trace["warnings"][-1] = 1
+  trace.update({key: np.zeros((16, 1)) for key in grasp_dashboard.CONTACT_KEYS})
+  trace["contact_steps"] = np.zeros(1)
+  validated = []
+
+  def validate(model, trajectory, world_trace, config):
+    validated.append(int(world_trace["qpos"][0, 0]))
+    return {"passed": not bool(np.any(world_trace["warnings"]))}
+
+  monkeypatch.setattr(grasp, "validate", validate)
+  metrics = grasp_dashboard.validate_run(None, None, trace, validate_config({"nworld": 16}))
+  assert validated == list(range(16))
+  assert not metrics["passed"] and metrics["passed_count"] == 15
+  assert metrics["pass_fraction"] == 15 / 16
+  assert metrics["worlds"][0]["passed"] and not metrics["worlds"][-1]["passed"]
+  replay = grasp_dashboard.world_trace(trace, 16, 15)
+  np.testing.assert_array_equal(replay["qpos"], trace["qpos"][15])
+  assert replay["warnings"][0] == 1
 
 
 def test_worker_marks_failed_stage(tmp_path, monkeypatch):
