@@ -2,7 +2,7 @@
   <compiler angle="radian" meshdir="meshes" autolimits="true" balanceinertia="false"/>
   <default>
     <joint armature="0.005" damping="0.12" frictionloss="0.04"/>
-    <geom solref="0.004 1" solimp="0.95 0.99 0.001" friction="0.7 0.02 0.002"/>
+    <geom condim="6" solref="0.004 1" solimp="0.95 0.99 0.001" friction="0.7 0.02 0.002"/>
     <default class="visual">
       <geom type="mesh" contype="0" conaffinity="0" group="2" rgba="0.74 0.77 0.82 1"/>
     </default>

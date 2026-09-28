@@ -9,36 +9,66 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from grasp_config import validate_config
 
 SCENE = Path(__file__).resolve().with_name("grasp_scene.xml")
 PICK = np.array([-0.16, -0.075])
 PLACE = np.array([-0.16, 0.075])
 TABLE_HEIGHT = 0.75
-# This demonstration tolerates a few centimetres of sliding during release.
-PLACEMENT_TOLERANCE = 0.05
 TIMES = np.array([0, 1, 3, 6, 8, 11, 14, 17, 18, 19.5, 21.5, 24])
 ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 7))
 ARM_ACTUATORS = tuple(f"position{i}" for i in range(1, 7))
 
 
-def build_model():
+def build_model(config=None):
+  config = validate_config(config or {})
   if not SCENE.with_name("meshes").joinpath("cat_phone_stand.obj").exists():
     raise FileNotFoundError("Run prepare_cat.py --source /path/to/cat_phone_stand.stl first")
   spec = mujoco.MjSpec.from_file(str(SCENE))
+  spec.option.timestep = config["timestep"]
+  spec.option.iterations = config["solver_iterations"]
+  spec.option.sdf_initpoints = config["sdf_initpoints"]
+  spec.option.sdf_iterations = config["sdf_iterations"]
+  spec.nconmax = config["nconmax"]
+  spec.njmax = config["njmax"]
   for mesh in spec.meshes:
     if mesh.name == "cat_phone_stand":
-      mesh.octree_maxdepth = 8
+      mesh.octree_maxdepth = config["sdf_depth"]
   # Set this before compiling so CPU's ngravcomp and Warp agree.
   robot_names = {"base_link", "flange_link", "gripper_base", "gripper_link1", "gripper_link2"}
   robot_names.update(f"link{i}" for i in range(1, 7))
   for body in spec.bodies:
     if body.name in robot_names:
-      body.gravcomp = 1
+      body.gravcomp = config["gravcomp"]
   for geom in spec.geoms:
+    geom.condim = config["condim"]
     if geom.name == "tabletop":
       geom.priority = 2
-      geom.solref = [0.02, 1]
-      geom.friction = [0.8, 0.005, 0.0001]
+      geom.solref = [config["table_contact_time"], 1]
+      geom.friction = [config["table_friction"], config["table_torsional_friction"], config["table_rolling_friction"]]
+    elif geom.name == "cat_sdf":
+      geom.mass = config["cat_mass"]
+      geom.solref = [config["cat_contact_time"], 1]
+      geom.friction = [config["cat_friction"], config["cat_torsional_friction"], config["cat_rolling_friction"]]
+  for joint in spec.joints:
+    if joint.name in ARM_JOINTS:
+      joint.damping[0] = config["arm_damping"][ARM_JOINTS.index(joint.name)]
+    elif joint.name in ("gripper_joint1", "gripper_joint2"):
+      joint.damping[0] = config["gripper_damping"]
+  for actuator in spec.actuators:
+    if actuator.name in ARM_ACTUATORS:
+      index = ARM_ACTUATORS.index(actuator.name)
+      kp, kv, limit = (config[key][index] for key in ("arm_kp", "arm_kv", "arm_force_limit"))
+    elif actuator.name == "gripper_opening":
+      kp, kv, limit = (config[key] for key in ("gripper_kp", "gripper_kv", "gripper_force_limit"))
+    else:
+      continue
+    actuator.gainprm[0] = kp
+    actuator.biasprm[1:3] = [-kp, -kv]
+    actuator.forcerange = [-limit, limit]
+  # MuJoCo's process-wide mesh cache omits octree depth from its key.
+  # Recompiling after a different depth must rebuild the SDF octree.
+  mujoco.mj_clearCache(mujoco.mj_getCache())
   model = spec.compile()
   # The included robot keyframe predates the object's free joint.
   free = model.joint("cat_free").qposadr[0]
@@ -116,7 +146,7 @@ def make_trajectory(model):
   return {"ctrl": controls, "times": times, "qpos": model.key_qpos[:1].copy(), "qvel": np.zeros((1, model.nv))}
 
 
-def rollout_cpu(model, trajectory):
+def rollout_cpu(model, trajectory, progress=None, record_contact_forces=False):
   data = mujoco.MjData(model)
   data.qpos[:] = trajectory["qpos"][0]
   data.qvel[:] = trajectory["qvel"][0]
@@ -129,6 +159,15 @@ def rollout_cpu(model, trajectory):
   cat = model.geom("cat_sdf").id
   finger_bodies = [model.body(name).id for name in ("gripper_link1", "gripper_link2")]
   table = model.geom("tabletop").id
+  if record_contact_forces:
+    sample_stride = max(1, round(0.01 / model.opt.timestep))
+    sample_steps = np.arange(0, len(controls), sample_stride, dtype=np.int32)
+    capacity = min(model.nconmax, 256)
+    contact_positions = np.zeros((len(sample_steps), capacity, 3), dtype=np.float32)
+    contact_forces = np.zeros_like(contact_positions)
+    contact_groups = np.zeros((len(sample_steps), capacity), dtype=np.uint8)
+    contact_counts = np.zeros(len(sample_steps), dtype=np.int32)
+    contact_totals = np.zeros(len(sample_steps), dtype=np.int32)
   for step, ctrl in enumerate(controls):
     data.ctrl[:] = ctrl
     mujoco.mj_step(model, data)
@@ -145,13 +184,48 @@ def rollout_cpu(model, trajectory):
           contacts[step, 3] += 1
       elif a == table or b == table:
         contacts[step, 3] += 1
+    if record_contact_forces and step % sample_stride == 0:
+      sample = step // sample_stride
+      for contact_id, contact in enumerate(data.contact):
+        a, b = contact.geom
+        if a != cat and b != cat:
+          continue
+        contact_totals[sample] += 1
+        slot = contact_counts[sample]
+        if slot >= capacity:
+          continue
+        local_force = np.zeros(6)
+        mujoco.mj_contactForce(model, data, contact_id, local_force)
+        force_on_cat = contact.frame.reshape(3, 3).T @ local_force[:3]
+        if a == cat:
+          force_on_cat = -force_on_cat
+        other = b if a == cat else a
+        body = model.geom_bodyid[other]
+        group = 1 if other == table else 2 if body == finger_bodies[0] else 3 if body == finger_bodies[1] else 4
+        contact_positions[sample, slot] = contact.pos
+        contact_forces[sample, slot] = force_on_cat
+        contact_groups[sample, slot] = group
+        contact_counts[sample] += 1
     if step % 2000 == 0:
       free = model.joint("cat_free").qposadr[0]
       print(f"t={data.time:.1f}s cat={data.qpos[free : free + 3].round(4)} contacts={contacts[step]}", flush=True)
-  return {"qpos": positions, "qvel": velocities, "force": forces, "contacts": contacts, "warnings": data.warning.number.copy()}
+      if progress is not None:
+        progress(float(data.time))
+  trace = {"qpos": positions, "qvel": velocities, "force": forces, "contacts": contacts, "warnings": data.warning.number.copy()}
+  if record_contact_forces:
+    trace.update(
+      contact_steps=sample_steps,
+      contact_positions=contact_positions,
+      contact_forces=contact_forces,
+      contact_groups=contact_groups,
+      contact_counts=contact_counts,
+      contact_totals=contact_totals,
+    )
+  return trace
 
 
-def validate(model, trajectory, trace):
+def validate(model, trajectory, trace, config=None):
+  config = validate_config(config or {})
   times = trajectory["times"]
   free = model.joint("cat_free").qposadr[0]
   cat = trace["qpos"][:, free : free + 3]
@@ -173,7 +247,7 @@ def validate(model, trajectory, trace):
   results = {
     "minimum_carried_height_m": float(np.min(bottom[carried] - TABLE_HEIGHT)),
     "placement_error_m": float(np.linalg.norm(cat[-1, :2] - PLACE)),
-    "placement_tolerance_m": PLACEMENT_TOLERANCE,
+    "placement_tolerance_m": config["placement_tolerance"],
     "final_position_m": cat[-1].tolist(),
     "both_fingers_contact": bool(np.any(np.all(contact[(times >= 7) & (times <= 14), :2] > 0, axis=1))),
     "carried_contact_fraction": float(np.mean(np.all(contact[carried, :2] > 0, axis=1))),
@@ -187,13 +261,13 @@ def validate(model, trajectory, trace):
     np.all(np.isfinite(trace["qpos"])),
     np.all(np.isfinite(trace["qvel"])),
     not np.any(trace["warnings"]),
-    results["minimum_carried_height_m"] >= 0.08,
-    results["placement_error_m"] <= PLACEMENT_TOLERANCE,
+    results["minimum_carried_height_m"] >= config["minimum_carried_height"],
+    results["placement_error_m"] <= config["placement_tolerance"],
     results["both_fingers_contact"],
-    results["carried_contact_fraction"] > 0.95,
+    results["carried_contact_fraction"] >= config["minimum_contact_fraction"],
     results["unexpected_contacts"] == 0,
     results["final_speed"] < 0.1,
-    results["final_drift_m"] < 0.005,
+    results["final_drift_m"] <= config["maximum_final_drift"],
     results["joint_limit_error"] < 0.001,
     results["force_limit_error"] < 1e-4,
     base.jntnum[0] == 0 and np.allclose(base.pos, [-0.5, 0, 0.75]),

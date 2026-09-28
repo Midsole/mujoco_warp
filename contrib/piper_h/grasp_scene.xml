@@ -37,7 +37,7 @@
     <body name="cat_phone_stand" pos="-0.16 -0.075 0.7505">
       <freejoint name="cat_free"/>
       <geom name="cat_sdf" type="sdf" mesh="cat_phone_stand" mass="0.1" rgba="0.82 0.55 0.18 0"
-            friction="0.8 0.005 0.0001" condim="4" priority="1" solref="0.004 1" solimp="0.95 0.99 0.001"/>
+            friction="0.8 0.005 0.0001" condim="6" priority="1" solref="0.004 1" solimp="0.95 0.99 0.001"/>
       <!-- mjviser currently renders meshes but not native SDF geoms. No extra mass or collision. -->
       <geom name="cat_visual" type="mesh" mesh="cat_phone_stand" mass="0" contype="0" conaffinity="0"
             group="1" rgba="0.82 0.55 0.18 1"/>

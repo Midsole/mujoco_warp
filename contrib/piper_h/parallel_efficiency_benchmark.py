@@ -18,6 +18,7 @@ from grasp import make_trajectory
 import mujoco_warp as mjw
 
 PHASES = {"settle": "0.5", "grip": "7.5", "carry": "12.5", "release": "18.5"}
+DEFAULT_OUTPUT = Path(__file__).resolve().parent / "results" / "parallel_efficiency" / "benchmark_results.json"
 
 
 @wp.kernel
@@ -211,7 +212,9 @@ def main():
   parser.add_argument("--repeats", type=int, default=3)
   parser.add_argument("--nconmax", type=int, default=256)
   parser.add_argument("--njmax", type=int, default=1024)
-  parser.add_argument("--output", type=Path, default=Path("/tmp/piper_h_parallel_results.json"))
+  parser.add_argument(
+    "--output", type=Path, default=DEFAULT_OUTPUT, help="Result JSON path; defaults to the local results directory"
+  )
   args = parser.parse_args()
 
   if args.mode == "snapshots" and args.snapshots is None:
@@ -219,6 +222,7 @@ def main():
 
   if not wp.is_cuda_available():
     raise RuntimeError("CUDA device required")
+  args.output.parent.mkdir(parents=True, exist_ok=True)
   wp.config.log_level = wp.LOG_WARNING
   model = build_model()
   if args.mode == "full":

@@ -1,0 +1,513 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PiPER H 仿真实验</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0b1320; color: #e8eef7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    header { padding: 22px clamp(18px, 3vw, 48px); border-bottom: 1px solid #283747; background: #101e2e; }
+    header h1 { margin: 0 0 5px; font-size: 26px; letter-spacing: .01em; }
+    header p { margin: 0; color: #9bb1c7; }
+    main { display: grid; grid-template-columns: minmax(310px, 380px) minmax(520px, 1fr); gap: 20px;
+      max-width: 1800px; margin: 0 auto; padding: 20px clamp(14px, 2vw, 32px); }
+    section, details { background: #142337; border: 1px solid #29405a; border-radius: 14px; }
+    section { padding: 20px; margin-bottom: 18px; }
+    h2 { margin: 0 0 14px; font-size: 19px; }
+    h3 { font-size: 15px; margin: 14px 0 8px; color: #a9c9e2; }
+    p { line-height: 1.5; }
+    .muted, small { color: #9bb1c7; }
+    .controls { position: sticky; top: 15px; align-self: start; max-height: calc(100vh - 30px); overflow: auto; }
+    .toolbar, .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    label { display: block; font-size: 13px; color: #bdd0e1; margin: 10px 0 4px; }
+    input, select, button { font: inherit; }
+    input[type=number], select { width: 100%; border: 1px solid #45627d; border-radius: 8px; padding: 8px 10px;
+      color: #f4f8fd; background: #0e1a2b; }
+    .six { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .six input { min-width: 0; }
+    button { border: 1px solid #53718d; border-radius: 9px; background: #1d3550; color: #f4f8fd;
+      padding: 9px 13px; cursor: pointer; }
+    button:hover { background: #294d70; }
+    button.primary { border-color: #28b8dd; background: #1385aa; font-weight: 700; }
+    button.primary:hover { background: #0fa5ce; }
+    button.danger { border-color: #d97575; background: #663238; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    details { margin-top: 10px; padding: 0 12px; }
+    summary { cursor: pointer; padding: 12px 2px; font-weight: 700; }
+    .fields { padding: 0 0 13px; }
+    .condim-guide { margin: 12px 0; padding: 10px; border: 1px solid #3c6580; border-radius: 9px; background: #10283b; }
+    .condim-guide strong { font-size: 13px; }
+    .condim-guide table { margin-top: 5px; }
+    .condim-guide th, .condim-guide td { padding: 6px 5px; }
+    .condim-guide tr.selected { background: #20506b; }
+    .friction-status { display: block; margin-top: 4px; color: #7ee1af; }
+    .friction-status.inactive { color: #efca83; }
+    .contact-time-status { display: block; margin-top: 4px; }
+    .contact-time-status.clamped { color: #efca83; }
+    .notice { background: #1b3247; border-left: 3px solid #36b9d7; padding: 10px 13px; border-radius: 5px; }
+    .error { color: #ffb7b7; }
+    .success { color: #7ee1af; }
+    .badge { display: inline-block; border-radius: 99px; border: 1px solid #51738e; padding: 4px 9px; font-size: 12px; }
+    .steps { list-style: none; padding: 0; margin: 12px 0; display: grid; gap: 7px; }
+    .steps li { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      padding: 10px 12px; border: 1px solid #324f69; border-radius: 9px; background: #102032; }
+    .steps li.running { border-color: #28b8dd; background: #17344a; }
+    .steps li.completed .step-detail { color: #7ee1af; }
+    .steps li.pending { opacity: .65; }
+    .steps li.failed .step-detail, .steps li.canceled .step-detail { color: #ffb7b7; }
+    .step-detail { color: #a9c9e2; text-align: right; font-variant-numeric: tabular-nums; }
+    .results { min-width: 0; }
+    .replays { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+    .replay-box { min-width: 0; }
+    .replay-box p { margin: 4px 0 8px; }
+    .replay-view { width: 100%; aspect-ratio: 4/3; background: #081019; border-radius: 10px;
+      display: block; object-fit: contain; touch-action: none; cursor: grab; }
+    .replay-view:active { cursor: grabbing; }
+    .replay-box:fullscreen { background: #081019; padding: 14px; overflow: auto; }
+    .replay-box:fullscreen .replay-view { width: 100%; height: calc(100vh - 170px); aspect-ratio: auto; }
+    .timeline { width: 100%; }
+    .replay-controls { display: flex; align-items: center; gap: 9px; }
+    .replay-controls select { width: auto; }
+    .replay-controls time { min-width: 74px; font-variant-numeric: tabular-nums; }
+    .force-controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
+    .force-controls label { display: inline-flex; align-items: center; gap: 6px; margin: 0; }
+    .force-controls select { width: auto; }
+    .force-legend { color: #9bb1c7; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 9px; }
+    .metric { border: 1px solid #324f69; border-radius: 9px; padding: 11px; background: #102032; }
+    .metric strong { display: block; font-size: 21px; margin-top: 3px; }
+    .history { max-height: 390px; overflow: auto; }
+    .run { padding: 11px 0; border-top: 1px solid #2a4259; }
+    .run:first-child { border-top: 0; }
+    .run .row { justify-content: space-between; }
+    .run small { display: block; margin: 3px 0 8px; }
+    .run button { font-size: 12px; padding: 5px 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 9px 7px; border-bottom: 1px solid #2c455b; text-align: left; }
+    th { color: #a9c9e2; }
+    .scroll { overflow-x: auto; }
+    @media (max-width: 940px) { main { grid-template-columns: 1fr; } .controls { position: static; max-height: none; } }
+  </style>
+</head>
+<body>
+  <header><h1>PiPER H 仿真实验</h1><p>调整物理与控制参数，逐次运行抓取，并对照每轮效果。</p></header>
+  <main>
+    <section class="controls">
+      <h2>新建运行</h2>
+      <label for="engine">物理后端</label>
+      <select id="engine"><option value="warp">Warp GPU</option><option value="c">MuJoCo CPU</option></select>
+      <div id="field-groups"></div>
+      <p class="notice" id="contact-time-notice" role="status" aria-live="polite"></p>
+      <p class="muted">动作轨迹保持当前 24 秒基线。猫与桌面接触采用桌面系数，猫与夹爪接触采用猫的系数。验收标准只影响通过判定，不改变仿真运动。</p>
+      <div class="toolbar"><button class="primary" id="start">开始仿真</button><button id="reset">恢复默认值</button></div>
+      <p id="form-message" role="status"></p>
+    </section>
+    <div class="results">
+      <section>
+        <div class="row" style="justify-content:space-between"><h2>当前运行</h2><span id="state" class="badge">尚未运行</span></div>
+        <p id="progress" class="muted">从左侧选择参数并开始运行。</p>
+        <ol id="steps" class="steps" aria-label="运行步骤"></ol>
+        <button class="danger" id="cancel" hidden>取消当前运行</button>
+        <p id="run-error" class="error"></p>
+        <div class="replays" id="replays"></div>
+      </section>
+      <section>
+        <h2>物理结果与验收</h2><div id="result-summary" class="muted">运行结束后显示结果。</div>
+        <div class="metrics" id="metrics"></div>
+        <h3>本轮验收标准</h3><div id="thresholds" class="muted">运行结束后显示所用阈值。</div>
+        <h3>两轮对照</h3><div class="scroll" id="comparison" class="muted">在历史记录里选择一轮作为对照。</div>
+      </section>
+      <section>
+        <h2>运行历史</h2><div id="history" class="history muted">正在读取记录…</div>
+      </section>
+      <section><details><summary>本版尚未开放的参数</summary><p class="muted">物体网格与初始位姿、取放路点、动作时序、夹爪开合轨迹、IK 与末端姿态；工作台和基座几何、碰撞表示与机器人碰撞代理、双指独立控制；solimp 与接触优先级、关节摩擦损失与 armature；求解器算法和摩擦锥类型。</p></details></section>
+    </div>
+  </main>
+  <script>
+    const fields = new Map();
+    const frictionDimensions = {
+      cat_friction: 3, table_friction: 3,
+      cat_torsional_friction: 4, table_torsional_friction: 4,
+      cat_rolling_friction: 6, table_rolling_friction: 6,
+    };
+    let defaults = {}, selectedId = null, compareId = null, selectedRun = null, compareRun = null, replayKey = '';
+    const $ = (id) => document.getElementById(id);
+    const escapeHtml = (value) => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    async function api(url, options = {}) {
+      let response;
+      try { response = await fetch(url, {headers: {'Content-Type':'application/json'}, ...options}); }
+      catch { throw new Error('无法连接仿真服务。请确认服务仍在运行，然后刷新页面。'); }
+      if (response.status === 401) { location.reload(); throw new Error('访问令牌已失效'); }
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || '请求失败');
+      return result;
+    }
+    function buildFields(spec) {
+      defaults = spec.defaults;
+      const groups = new Map();
+      for (const field of spec.fields) {
+        fields.set(field.key, field);
+        if (!groups.has(field.group)) groups.set(field.group, []);
+        groups.get(field.group).push(field);
+      }
+      for (const [name, items] of groups) {
+        const details = document.createElement('details');
+        details.open = name !== '高级仿真';
+        const summary = document.createElement('summary'); summary.textContent = name; details.append(summary);
+        const box = document.createElement('div'); box.className = 'fields';
+        for (const field of items) {
+          const label = document.createElement('label'); label.textContent = field.label; box.append(label);
+          const container = document.createElement('div');
+          const values = Array.isArray(field.default) ? field.default : [field.default];
+          if (field.choices) {
+            const select = document.createElement('select'); select.dataset.key = field.key;
+            select.setAttribute('aria-label', field.label);
+            for (const choice of field.choices) {
+              const option = document.createElement('option'); option.value = choice; option.textContent = choice;
+              select.append(option);
+            }
+            select.value = field.default; container.append(select);
+          } else {
+            if (values.length > 1) container.className = 'six';
+            values.forEach((value, index) => {
+              const input = document.createElement('input'); input.type = 'number';
+              input.step = field.integer ? '1' : 'any'; input.min = field.min; input.max = field.max;
+              input.value = value; input.dataset.key = field.key; input.dataset.index = index;
+              input.setAttribute('aria-label', values.length > 1 ? `${field.label} 第 ${index + 1} 轴` : field.label);
+              container.append(input);
+            });
+          }
+          box.append(container);
+          if (field.key === 'condim') {
+            const guide = document.createElement('div'); guide.className = 'condim-guide';
+            guide.innerHTML = `<strong>condim 与摩擦项</strong>
+              <table><thead><tr><th>维数</th><th>参与求解的摩擦项</th></tr></thead><tbody>
+                <tr data-condim="1"><td>1</td><td>无，仅法向接触</td></tr>
+                <tr data-condim="3"><td>3</td><td>滑动（两个切向）</td></tr>
+                <tr data-condim="4"><td>4</td><td>滑动 + 扭转</td></tr>
+                <tr data-condim="6"><td>6</td><td>滑动 + 扭转 + 滚动（两个轴）</td></tr>
+              </tbody></table>`;
+            box.append(guide);
+            container.querySelector('select').addEventListener('change', updateCondimGuide);
+          }
+          if (field.key in frictionDimensions) {
+            const status = document.createElement('small'); status.className = 'friction-status';
+            status.dataset.minCondim = frictionDimensions[field.key]; box.append(status);
+          }
+          if (field.key === 'cat_contact_time' || field.key === 'table_contact_time') {
+            const status = document.createElement('small'); status.className = 'contact-time-status';
+            status.dataset.contactTimeKey = field.key; box.append(status);
+            container.querySelector('input').setAttribute('aria-describedby', 'contact-time-notice');
+          }
+          if (['cat_contact_time', 'table_contact_time', 'timestep'].includes(field.key)) {
+            container.querySelector('input').addEventListener('input', updateContactTimeGuide);
+          }
+        }
+        details.append(box); $('field-groups').append(details);
+      }
+      updateCondimGuide();
+      updateContactTimeGuide();
+    }
+    function updateContactTimeGuide() {
+      const timestepInput = document.querySelector('input[data-key="timestep"]');
+      const timestep = Number(timestepInput.value);
+      const notice = $('contact-time-notice');
+      const prefix = '接触时间常数保护已开启（CPU / Warp）：实际计算值 = max(填写值, 2 × 物理步长)。';
+      const valid = input => input.value.trim() !== '' && input.checkValidity();
+      if (!valid(timestepInput)) {
+        notice.textContent = `${prefix} 请填写有效步长后查看当前生效值。`;
+      } else {
+        notice.textContent = `${prefix} 当前步长 ${(timestep * 1000).toFixed(3)} ms，` +
+          `时间常数至少按 ${(2 * timestep * 1000).toFixed(3)} ms 计算；建议填写值不小于该下限。`;
+      }
+      document.querySelectorAll('.contact-time-status').forEach(status => {
+        const input = document.querySelector(`input[data-key="${status.dataset.contactTimeKey}"]`);
+        const ready = valid(timestepInput) && valid(input);
+        const clamped = ready && Number(input.value) < 2 * timestep;
+        status.classList.toggle('clamped', clamped);
+        status.textContent = ready
+          ? `${clamped ? '填写值低于保护下限：' : ''}当前接触时间常数按 ` +
+            `${(Math.max(Number(input.value), 2 * timestep) * 1000).toFixed(3)} ms 计算`
+          : '填写有效时间常数和步长后显示生效值';
+      });
+    }
+    function updateCondimGuide() {
+      const condim = Number(document.querySelector('select[data-key="condim"]').value);
+      document.querySelectorAll('.condim-guide [data-condim]').forEach(row => {
+        row.classList.toggle('selected', Number(row.dataset.condim) === condim);
+      });
+      document.querySelectorAll('.friction-status').forEach(status => {
+        const minimum = Number(status.dataset.minCondim);
+        const active = condim >= minimum;
+        status.textContent = active ? `当前 condim=${condim}：生效` : `当前 condim=${condim}：不生效`;
+        status.classList.toggle('inactive', !active);
+      });
+    }
+    function readForm() {
+      const config = {engine: $('engine').value};
+      for (const field of fields.values()) {
+        const values = [...document.querySelectorAll(`[data-key="${field.key}"]`)].map(input => {
+          if (input.value.trim() === '') throw new Error(`${field.label} 不能为空`);
+          const number = Number(input.value);
+          if (!Number.isFinite(number) || number < field.min || number > field.max ||
+              (field.integer && !Number.isInteger(number)) ||
+              (field.choices && !field.choices.includes(number))) throw new Error(`${field.label} 超出有效范围`);
+          return number;
+        });
+        config[field.key] = Array.isArray(field.default) ? values : values[0];
+      }
+      return config;
+    }
+    $('reset').onclick = () => {
+      $('engine').value = 'warp';
+      for (const field of fields.values()) {
+        document.querySelectorAll(`[data-key="${field.key}"]`).forEach((input, i) => {
+          input.value = Array.isArray(field.default) ? field.default[i] : field.default;
+        });
+      }
+      updateCondimGuide();
+      updateContactTimeGuide();
+      $('form-message').textContent = '已恢复默认值';
+    };
+    $('start').onclick = async () => {
+      try {
+        $('form-message').textContent = '';
+        const config = readForm();
+        const run = await api('/api/runs', {method:'POST', body:JSON.stringify(config)});
+        selectedId = run.id; compareId = null; compareRun = null;
+        await refresh();
+      } catch (error) { $('form-message').textContent = error.message; $('form-message').className = 'error'; }
+    };
+    $('cancel').onclick = async () => {
+      try { await api(`/api/runs/${selectedId}/cancel`, {method:'POST', body:'{}'}); await refresh(); }
+      catch (error) { $('run-error').textContent = error.message; }
+    };
+    const metricNames = [
+      ['minimum_carried_height_m','携带最低高度','m'], ['placement_error_m','放置误差','m'],
+      ['carried_contact_fraction','携带时双指接触比例',''], ['final_drift_m','最终漂移','m'],
+      ['final_speed','最终线/角速度最大值',''], ['both_fingers_contact','曾同时接触双指',''],
+      ['unexpected_contacts','非预期接触','次'],
+      ['joint_limit_error','关节限位误差',''], ['force_limit_error','执行器力限制误差',''],
+    ];
+    function format(value) {
+      if (typeof value === 'boolean') return value ? '是' : '否';
+      return typeof value === 'number' ? (Number.isInteger(value) ? String(value) : value.toFixed(4)) : '—';
+    }
+    function renderSteps(run) {
+      const host = $('steps'); host.replaceChildren();
+      if (!run?.steps) return;
+      run.steps.forEach((step, index) => {
+        const row = document.createElement('li'); row.className = step.state;
+        const name = document.createElement('strong'); name.textContent = `${index + 1}. ${step.name}`;
+        const detail = document.createElement('span'); detail.className = 'step-detail';
+        if (step.state === 'running') {
+          const elapsed = Math.max(0, (Date.now() - Date.parse(step.started_at)) / 1000);
+          detail.textContent = `正在${step.name} · 已用 ${elapsed.toFixed(1)} 秒` +
+            (index === 3 ? ` · 仿真 ${format(run.sim_time || 0)} / 24 秒` : '');
+        } else if (step.state === 'completed') {
+          detail.textContent = `已完成 · 耗时 ${step.duration_seconds.toFixed(2)} 秒`;
+        } else if (step.state === 'failed' || step.state === 'canceled') {
+          detail.textContent = `${step.state === 'failed' ? '失败' : '已取消'} · 已用 ${(step.duration_seconds || 0).toFixed(2)} 秒`;
+        } else detail.textContent = '待开始';
+        row.append(name, detail); host.append(row);
+      });
+    }
+    function replayBox(run, title) {
+      const wrap = document.createElement('div'); wrap.className = 'replay-box';
+      const text = document.createElement('p'); text.textContent = `${title} · ${run.engine.toUpperCase()} · ${run.id.slice(0, 8)}`;
+      wrap.append(text);
+      const image = document.createElement('img'); image.className = 'replay-view'; image.alt = `${title} MuJoCo 状态回放`;
+      image.draggable = false; wrap.append(image);
+      const hint = document.createElement('small'); hint.textContent = '拖动旋转 · Shift 拖动平移 · 滚轮缩放'; wrap.append(hint);
+      const timeline = document.createElement('input'); timeline.type = 'range'; timeline.className = 'timeline';
+      timeline.min = '0'; timeline.max = '24'; timeline.step = '0.05'; timeline.value = '0'; wrap.append(timeline);
+      const controls = document.createElement('div'); controls.className = 'replay-controls';
+      const play = document.createElement('button'); play.textContent = '播放'; play.disabled = true; controls.append(play);
+      const clock = document.createElement('time'); clock.textContent = '0.00 / 24 s'; controls.append(clock);
+      const quality = document.createElement('select'); quality.setAttribute('aria-label', '渲染分辨率');
+      for (const width of [640, 960, 1280, 1920]) {
+        const option = document.createElement('option'); option.value = width; option.textContent = `${width} × ${width * 3 / 4}`;
+        if (width === 960) option.selected = true;
+        quality.append(option);
+      }
+      controls.append(quality); wrap.append(controls);
+      const expand = document.createElement('button'); expand.textContent = '放大画面';
+      expand.onclick = () => wrap.requestFullscreen(); controls.append(expand);
+      const forceControls = document.createElement('div'); forceControls.className = 'force-controls';
+      const forceLabel = document.createElement('label');
+      const showForces = document.createElement('input'); showForces.type = 'checkbox';
+      showForces.disabled = !run.contact_forces_ready;
+      forceLabel.append(showForces, document.createTextNode('显示作用在猫上的接触力'));
+      forceControls.append(forceLabel);
+      const scaleLabel = document.createElement('label'); scaleLabel.textContent = '箭头比例';
+      const forceScale = document.createElement('select'); forceScale.setAttribute('aria-label', '接触力箭头比例');
+      for (const [value, label] of [['0.03','3 cm/N'], ['0.1','10 cm/N'], ['0.3','30 cm/N'], ['1','100 cm/N']]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = label;
+        if (value === '0.3') option.selected = true;
+        forceScale.append(option);
+      }
+      forceScale.disabled = true; scaleLabel.append(forceScale); forceControls.append(scaleLabel); wrap.append(forceControls);
+      const legend = document.createElement('small'); legend.className = 'force-legend';
+      legend.textContent = run.contact_forces_ready
+        ? '蓝色：桌面 · 橙色：夹爪 · 红色：其他。箭头为法向与切向合力，不含扭转/滚动力矩；最长显示 20 cm。'
+        : '这轮历史运行没有保存接触力；请用当前版本重新运行后查看。';
+      wrap.append(legend);
+      const message = document.createElement('small'); message.setAttribute('role', 'status');
+      message.textContent = '正在准备回放…'; wrap.append(message);
+      const view = {time: 0, azimuth: 140, elevation: -25, distance: 3.3, x: 0, y: 0, z: 0.75};
+      let playing = false, busy = false, dirty = false, lastTick = 0, imageUrl = null, removed = false;
+      function draw() {
+        if (busy) { dirty = true; return; }
+        busy = true; dirty = false;
+        const forceEnabled = showForces.checked;
+        const query = new URLSearchParams({...view, width: quality.value,
+          contact_forces: forceEnabled ? '1' : '0', force_scale: forceScale.value});
+        fetch(`/api/runs/${run.id}/frame?${query}`).then(async response => {
+          if (!response.ok) throw new Error((await response.json()).error || '渲染失败');
+          const forceInfo = forceEnabled ? {
+            count: response.headers.get('X-Contact-Count'),
+            max: response.headers.get('X-Contact-Max-N'),
+            omitted: response.headers.get('X-Contact-Omitted'),
+            time: response.headers.get('X-Contact-Sample-Time'),
+          } : null;
+          const blob = await response.blob();
+          if (removed) return;
+          const nextUrl = URL.createObjectURL(blob);
+          image.src = nextUrl;
+          if (imageUrl) URL.revokeObjectURL(imageUrl);
+          imageUrl = nextUrl;
+          message.textContent = forceInfo ? `接触点 ${forceInfo.count} 个 · 最大单点合力 ${Number(forceInfo.max).toFixed(3)} N` +
+            ` · 采样时刻 ${forceInfo.time} s${Number(forceInfo.omitted) ? ` · 另有 ${forceInfo.omitted} 个未画出` : ''}` : '';
+          play.disabled = false;
+        }).catch(error => { if (!removed) message.textContent = error.message; }).finally(() => {
+          busy = false;
+          if (dirty && !removed) draw();
+        });
+      }
+      function setTime(value) {
+        view.time = Math.max(0, Math.min(24, value));
+        timeline.value = view.time;
+        clock.textContent = `${view.time.toFixed(2)} / 24 s`;
+        draw();
+      }
+      function tick(now) {
+        if (!playing || removed) return;
+        if (lastTick) setTime(view.time + Math.min((now - lastTick) / 1000, 0.25));
+        lastTick = now;
+        if (view.time >= 24) { playing = false; play.textContent = '播放'; return; }
+        requestAnimationFrame(tick);
+      }
+      play.onclick = () => {
+        if (view.time >= 24) setTime(0);
+        playing = !playing; play.textContent = playing ? '暂停' : '播放'; lastTick = 0;
+        if (playing) requestAnimationFrame(tick);
+      };
+      timeline.oninput = () => setTime(Number(timeline.value));
+      quality.onchange = draw;
+      showForces.onchange = () => { forceScale.disabled = !showForces.checked; draw(); };
+      forceScale.onchange = draw;
+      let pointer = null;
+      image.onpointerdown = event => { pointer = {x:event.clientX, y:event.clientY}; image.setPointerCapture(event.pointerId); };
+      image.onpointermove = event => {
+        if (!pointer) return;
+        const dx = event.clientX - pointer.x, dy = event.clientY - pointer.y;
+        pointer = {x:event.clientX, y:event.clientY};
+        if (event.shiftKey) {
+          const scale = view.distance / image.clientWidth;
+          const angle = view.azimuth * Math.PI / 180;
+          view.x = Math.max(-3, Math.min(3, view.x - dx * scale * Math.sin(angle)));
+          view.y = Math.max(-3, Math.min(3, view.y + dx * scale * Math.cos(angle)));
+          view.z = Math.max(-1, Math.min(4, view.z + dy * scale));
+        } else {
+          view.azimuth = Math.max(-360, Math.min(360, view.azimuth - dx * 0.5));
+          view.elevation = Math.max(-89, Math.min(89, view.elevation - dy * 0.5));
+        }
+        draw();
+      };
+      image.onpointerup = image.onpointercancel = () => { pointer = null; };
+      image.onwheel = event => { event.preventDefault(); view.distance = Math.max(0.25,
+        Math.min(10, view.distance * Math.exp(event.deltaY * 0.001))); draw(); };
+      wrap.dispose = () => { removed = true; if (imageUrl) URL.revokeObjectURL(imageUrl); };
+      draw();
+      return wrap;
+    }
+    function renderResults() {
+      const run = selectedRun;
+      $('state').textContent = run ? ({queued:'等待启动',running:'运行中',completed:'已完成',failed:'失败',canceled:'已取消'}[run.state] || run.state) : '尚未运行';
+      $('progress').textContent = run ? `${run.phase} · 仿真 ${format(run.sim_time || 0)} / 24 秒` : '从左侧选择参数并开始运行。';
+      renderSteps(run);
+      $('run-error').textContent = run?.error || '';
+      $('cancel').hidden = !run || !['queued','running'].includes(run.state);
+      $('start').disabled = Boolean(window.activeRun);
+      const replays = $('replays');
+      const nextReplayKey = `${run?.replay_ready ? run.id : ''}:${compareRun?.replay_ready ? compareRun.id : ''}`;
+      if (replayKey !== nextReplayKey) {
+        replayKey = nextReplayKey;
+        for (const item of replays.children) item.dispose();
+        replays.replaceChildren();
+        if (run?.replay_ready) replays.append(replayBox(run, '当前运行'));
+        if (compareRun?.replay_ready) replays.append(replayBox(compareRun, '对照运行'));
+      }
+      const result = run?.metrics;
+      $('result-summary').textContent = result ? (result.passed ? '验收通过' : '验收未通过；下方仍显示实际物理结果') : '运行结束后显示结果。';
+      $('result-summary').className = result?.passed ? 'success' : result ? 'error' : 'muted';
+      $('metrics').replaceChildren();
+      if (result) for (const [key, label, unit] of metricNames) {
+        const tile = document.createElement('div'); tile.className = 'metric';
+        const caption = document.createElement('span'); caption.textContent = label;
+        const value = document.createElement('strong'); value.textContent = `${format(result[key])}${unit ? ` ${unit}` : ''}`;
+        tile.append(caption, value); $('metrics').append(tile);
+      }
+      const thresholdKeys = ['minimum_carried_height','placement_tolerance','minimum_contact_fraction','maximum_final_drift'];
+      $('thresholds').textContent = run?.config ? thresholdKeys.map(key =>
+        `${fields.get(key).label}：${format(run.config[key])}`).join(' · ') : '运行结束后显示所用阈值。';
+      const comparison = $('comparison');
+      if (!result || !compareRun?.metrics) { comparison.textContent = '在历史记录里选择一轮作为对照。'; return; }
+      const changed = [...fields.keys()].filter(key => JSON.stringify(run.config[key]) !== JSON.stringify(compareRun.config[key]));
+      const rows = metricNames.map(([key,label,unit]) => `<tr><td>${escapeHtml(label)}</td><td>${format(result[key])} ${unit}</td><td>${format(compareRun.metrics[key])} ${unit}</td></tr>`).join('');
+      comparison.innerHTML = `<p>参数差异：${changed.length} 项${changed.length ? `（${changed.map(key => escapeHtml(fields.get(key).label)).join('、')}）` : ''}</p><table><thead><tr><th>指标</th><th>当前</th><th>对照</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+    function renderHistory(runs) {
+      const host = $('history'); host.replaceChildren();
+      if (!runs.length) { host.textContent = '暂无运行记录。'; return; }
+      for (const run of runs) {
+        const row = document.createElement('div'); row.className = 'run';
+        const top = document.createElement('div'); top.className = 'row';
+        const label = document.createElement('strong'); label.textContent = `${run.engine.toUpperCase()} · ${run.id.slice(0, 8)}`;
+        const status = document.createElement('span'); status.className = 'badge';
+        status.textContent = run.state === 'completed' ? (run.passed ? '通过' : '未通过') : run.state;
+        top.append(label, status); row.append(top);
+        const date = document.createElement('small'); date.textContent = new Date(run.created_at).toLocaleString(); row.append(date);
+        const buttons = document.createElement('div'); buttons.className = 'toolbar';
+        const select = document.createElement('button'); select.textContent = '查看';
+        select.onclick = async () => {
+          selectedId = run.id;
+          if (compareId === selectedId) { compareId = null; compareRun = null; }
+          selectedRun = await api(`/api/runs/${run.id}`);
+          renderResults(); renderHistory(runs);
+        };
+        const compare = document.createElement('button'); compare.textContent = '设为对照';
+        compare.disabled = run.id === selectedId;
+        compare.onclick = async () => { compareId = run.id; compareRun = await api(`/api/runs/${run.id}`); renderResults(); };
+        buttons.append(select, compare); row.append(buttons); host.append(row);
+      }
+    }
+    async function refresh() {
+      try {
+        const runs = await api('/api/runs');
+        window.activeRun = runs.find(run => ['queued','running'].includes(run.state));
+        if (!selectedId && runs.length) selectedId = runs[0].id;
+        if (selectedId) selectedRun = await api(`/api/runs/${selectedId}`);
+        if (compareId) compareRun = await api(`/api/runs/${compareId}`);
+        renderResults(); renderHistory(runs);
+      } catch (error) { $('run-error').textContent = error.message; }
+    }
+    (async () => {
+      try { buildFields(await api('/api/fields')); await refresh(); setInterval(refresh, 2000); }
+      catch (error) { $('form-message').textContent = error.message; }
+    })();
+  </script>
+</body>
+</html>

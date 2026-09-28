@@ -30,6 +30,41 @@ uv run python contrib/piper_h/grasp.py --headless --engine=warp
 
 一次动作约 24 秒仿真时间，结束后保持最后的控制目标。首次启动需要编译网格八叉树和 Warp 内核，实际播放速度取决于设备和查看器开销。
 
+### 浏览器参数实验页面
+
+在仓库根目录启动页面：
+
+```bash
+uv run python contrib/piper_h/grasp_dashboard.py
+# 需要局域网其他设备访问时：
+uv run python contrib/piper_h/grasp_dashboard.py --host 0.0.0.0
+```
+
+默认地址为 `http://127.0.0.1:8765/`。局域网模式下，用本机局域网 IP 替换地址中的 `0.0.0.0`。
+终端会打印本次启动的访问令牌；持有令牌的人可以调整参数和启动仿真，只应在可信网络中分享。
+如需固定令牌，可在启动命令前设置 `PIPER_H_DASHBOARD_TOKEN` 环境变量。
+使用页面期间需保持服务进程运行；未设置固定令牌时，重新启动服务会生成新令牌，需要刷新页面并重新输入。
+页面一次只执行一轮仿真，可取消当前运行；完成后保存每个物理步的状态，显示原始物理指标和验收结果，
+并可选择两轮运行对照。回放时由 MuJoCo 按需渲染状态：拖动画面旋转视角、按住 Shift 拖动平移、滚轮缩放，
+时间轴可定位到任意时刻，并可选择 640×480 至 1920×1440 分辨率。旧版历史中的状态文件也可直接回放。
+新运行还会每约 10 ms 保存一次猫与其他物体的真实接触点和作用在猫上的合力。回放中的“显示作用在猫上的接触力”
+可叠加力箭头，并显示当前采样时刻、接触点数和最大单点合力；蓝色代表桌面，橙色代表夹爪，红色代表其他接触。
+箭头长度可调，最长显示 20 cm，只表示平移力（法向与切向合力），不表示 `condim=4/6` 中的扭转或滚动力矩。
+采样点之间显示最近一次记录的力。旧运行未保存接触力时，页面会提示重新运行；原有状态回放仍可使用。
+新运行会显示提交配置、编译模型、生成动作轨迹、运行仿真、验收并保存五个步骤；每步完成后保留实际耗时。
+历史默认保存到 `~/.local/share/mujoco_warp/piper_h_runs/`，
+也可用 `--data-dir` 指定目录。页面关闭后历史仍保留。
+
+页面开放物体质量、物体与桌面的滑动/扭转/滚动摩擦、接触维数（`condim`，可选 1 / 3 / 4 / 6，默认 6）、接触时间常数、机械臂与夹爪增益和力限制、关节阻尼、重力补偿、
+SDF 深度与查询、物理步长、求解迭代、接触容量和验收阈值；CPU 与 Warp 均可选。
+物体与桌面的接触时间常数默认均为 4 ms；每轮可分别调整。CPU / Warp 的时间常数保护已开启，
+实际计算值至少为物理步长的两倍；页面随时间常数和步长输入更新生效值，低于保护下限时给出提醒。
+当前页面将 SDF 深度限制为 5–10；更深的八叉树在这台主机上可能耗尽内存并中断服务。
+抓取动作的目标、姿态、时序和开合轨迹仍采用固定基线。完整参数背景及暂未开放的设置见
+[参数设置总结](configuration_options.html)。验收阈值只改变通过判定，不会改变仿真运动。
+`condim=1` 只有法向接触、没有摩擦；`condim=3` 启用滑动摩擦；`condim=4` 再启用扭转摩擦；
+`condim=6` 再启用滚动摩擦。页面会随所选维数标注每个摩擦输入当前是否生效。
+
 终端会依次提示模型编译、轨迹生成和播放进度。前 1 秒仿真时间用于让物体落稳，之后机械臂开始接近。原生窗口将多个 1 ms 物理步合并到一次画面刷新，目标刷新率约 60 Hz；算力不足时播放仍会慢于实时，可根据终端的仿真时间判断是否在推进。
 
 原生窗口中，空格暂停/继续，句号单步。关闭窗口或在终端按 Ctrl+C 退出；网页模式需要在终端按 Ctrl+C 停止服务，关闭标签页不会停止仿真。重新执行命令可重新播放，查看器的 Reset 不会重置轨迹回放游标。回放期间自动目标会覆盖手动控制。
@@ -43,6 +78,7 @@ uv run python contrib/piper_h/grasp.py --headless --engine=warp
 | `grasp.py` | 唯一演示入口：模型配置、IK、控制轨迹、CPU 验证及查看器启动 |
 | `grasp_warp.py` | Warp GPU 仿真与接触记录 |
 | `grasp_viewer.py` | 复用现有查看器，为原生窗口分离物理步进和画面刷新 |
+| `grasp_config.py` / `grasp_dashboard.py` / `grasp_dashboard.html` | 参数校验、局域网运行服务和实验页面 |
 | `grasp_scene.xml` | 桌子、地面、灯光、相机和猫猫 SDF 物体 |
 | `piper_h.xml` | 六轴机械臂、夹爪、位置执行器及初始关键帧 |
 | `meshes/` | 机械臂和夹爪 STL、猫猫完整 OBJ |
@@ -87,7 +123,7 @@ uv run python contrib/piper_h/grasp.py --headless --engine=warp
 
 ## SDF 与资产准备
 
-猫模型的碰撞几何为原生 `type="sdf"`，由 MuJoCo 编译网格八叉树。脚本设置 `octree_maxdepth=8`，场景使用 `sdf_initpoints=40`、`sdf_iterations=10` 和 `condim=4`。夹爪盒体及桌面盒体直接与物体 SDF 求接触，不使用包围盒或凸包替代物体形状。桌面使用较柔和的接触参数，以缓和落桌冲击。
+猫模型的碰撞几何为原生 `type="sdf"`，由 MuJoCo 编译网格八叉树。脚本设置 `octree_maxdepth=8`，场景使用 `sdf_initpoints=40`、`sdf_iterations=10`；所有几何体默认使用 `condim=6`，页面每轮运行可统一改为 1 / 3 / 4 / 6。夹爪盒体及桌面盒体直接与物体 SDF 求接触，不使用包围盒或凸包替代物体形状。桌面使用较柔和的接触参数，以缓和落桌冲击。
 
 为兼容网页查看器，物体外观使用同一个完整网格的独立 `mesh` 几何，质量为零且关闭碰撞；透明的 SDF 几何承担物体质量和全部接触求解。机械臂本体使用圆柱、胶囊近似，夹爪沿用参考模型的盒形接触代理，机械臂视觉 STL 不参与碰撞。
 
@@ -105,7 +141,7 @@ uv run python contrib/piper_h/prepare_cat.py \
 ## 验证
 
 ```bash
-uv run pytest contrib/piper_h/grasp_test.py contrib/piper_h/grasp_viewer_test.py -q
+uv run pytest contrib/piper_h/grasp_test.py contrib/piper_h/grasp_viewer_test.py contrib/piper_h/grasp_dashboard_test.py -q
 uv run ruff check contrib/piper_h
 uv run ruff format --check contrib/piper_h
 uv run python contrib/kernel_analyzer/kernel_analyzer/cli.py contrib/piper_h/grasp_warp.py
@@ -118,3 +154,16 @@ uv run python contrib/kernel_analyzer/kernel_analyzer/cli.py contrib/piper_h/gra
 当前查看器可能在首次 CUDA 图执行前于 `Time = 0.0000` 打印惯量矩阵警告；实际步进已通过 CPU/GPU 验证。Warp 对胶囊—圆柱碰撞对还会提示最多生成一个接触点，该提示不影响猫模型的 SDF 接触。
 
 本示例不注册到默认 benchmark，也不修改公共查看器或物理引擎接口。
+
+### 本地性能结果
+
+`parallel_efficiency_benchmark.py` 保留在 Git 中。性能测量生成的报告、CSV 和 JSON 统一放在
+`results/parallel_efficiency/`，整个 `results/` 目录由 Git 忽略，仅保存在本机。
+现有报告为该目录中的 `parallel_efficiency_report.html`。
+
+```bash
+uv run python contrib/piper_h/parallel_efficiency_benchmark.py
+```
+
+默认输出为 `results/parallel_efficiency/benchmark_results.json`（相对于本示例目录），目录会自动创建。
+可使用 `--output` 指定其他文件名，保留不同轮次的测量结果。
