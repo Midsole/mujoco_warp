@@ -142,6 +142,8 @@ def warp_measure(model, warp_model, samples, nworld, steps, repeats, nconmax, nj
 
 
 def full_task_measure(model, warp_model, trajectory, nworld, nconmax, njmax):
+  if not len(trajectory["ctrl"]) or nworld < 1:
+    raise ValueError("trajectory must be nonempty and nworld must be positive")
   data = mujoco.MjData(model)
   data.qpos[:] = trajectory["qpos"][0]
   data.qvel[:] = trajectory["qvel"][0]
@@ -161,7 +163,7 @@ def full_task_measure(model, warp_model, trajectory, nworld, nconmax, njmax):
   initial_time = wp.zeros(nworld, dtype=float)
   zero_warmstart = wp.zeros((nworld, model.nv), dtype=float)
   zero_index = wp.zeros(1, dtype=int)
-  for _ in range(10):
+  for _ in range(min(10, len(trajectory["ctrl"]))):
     wp.capture_launch(graph)
   wp.synchronize()
   wp.copy(warp_data.qpos, initial_qpos)
@@ -185,7 +187,7 @@ def full_task_measure(model, warp_model, trajectory, nworld, nconmax, njmax):
     "steps_per_world": len(trajectory["ctrl"]),
     "world_steps_per_second": nworld * len(trajectory["ctrl"]) / elapsed,
     "gpu_memory_mib": memory,
-    "overflow": int(np.max(warp_data.overflow.numpy())),
+    "overflow": int(np.bitwise_or.reduce(warp_data.overflow.numpy())),
     "finite_qpos": bool(np.isfinite(qpos).all()),
     "placement_error_mean_m": float(np.mean(placement_errors)),
     "placement_error_max_m": float(np.max(placement_errors)),
@@ -207,6 +209,7 @@ def main():
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--snapshots", type=Path, help="Snapshot archive for --mode snapshots")
   parser.add_argument("--mode", choices=("snapshots", "full"), default="full")
+  parser.add_argument("--finger-collision", choices=("sdf", "box"), default="sdf")
   parser.add_argument("--worlds", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32, 64, 128, 256, 1])
   parser.add_argument("--steps", type=int, default=200)
   parser.add_argument("--repeats", type=int, default=3)
@@ -215,6 +218,7 @@ def main():
   parser.add_argument(
     "--output", type=Path, default=DEFAULT_OUTPUT, help="Result JSON path; defaults to the local results directory"
   )
+  parser.add_argument("--object-shape", choices=("cube", "cat"), default="cube")
   args = parser.parse_args()
 
   if args.mode == "snapshots" and args.snapshots is None:
@@ -224,11 +228,13 @@ def main():
     raise RuntimeError("CUDA device required")
   args.output.parent.mkdir(parents=True, exist_ok=True)
   wp.config.log_level = wp.LOG_WARNING
-  model = build_model()
+  model = build_model({"finger_collision": args.finger_collision, "object_shape": args.object_shape})
   if args.mode == "full":
     trajectory = make_trajectory(model)
     output = {
       "mode": "full",
+      "finger_collision": args.finger_collision,
+      "object_shape": args.object_shape,
       "device": wp.get_device("cuda:0").name,
       "model_timestep": model.opt.timestep,
       "control_steps": len(trajectory["ctrl"]),
@@ -246,6 +252,8 @@ def main():
 
   samples = load_snapshots(args.snapshots)
   output = {
+    "finger_collision": args.finger_collision,
+    "object_shape": args.object_shape,
     "device": wp.get_device("cuda:0").name,
     "model_timestep": model.opt.timestep,
     "steps_per_run": args.steps,

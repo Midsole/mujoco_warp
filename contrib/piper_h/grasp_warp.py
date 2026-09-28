@@ -162,7 +162,9 @@ def _contact_counts(
   counts_out[world, index[0]] = wp.min(totals[world, index[0]], capacity)
 
 
-def rollout_warp(model, trajectory, *, nworld=1, nconmax=256, njmax=1024, progress=None, record_contact_forces=False):
+def rollout_warp(
+  model, trajectory, *, nworld=1, nconmax=256, njmax=1024, progress=None, record_contact_forces=False, warp_model=None
+):
   """Run independent worlds; batched states and forces have a leading world axis."""
   if isinstance(nworld, bool) or not isinstance(nworld, int) or nworld < 1:
     raise ValueError("nworld must be a positive integer")
@@ -174,7 +176,7 @@ def rollout_warp(model, trajectory, *, nworld=1, nconmax=256, njmax=1024, progre
   mujoco.mj_forward(model, data)
   count = len(trajectory["ctrl"])
   with wp.ScopedDevice("cuda:0"):
-    m = mjw.put_model(model)
+    m = mjw.put_model(model) if warp_model is None else warp_model
     d = mjw.put_data(model, data, nworld=nworld, nconmax=nconmax, njmax=njmax)
     targets = wp.array(trajectory["ctrl"], dtype=float)
     index = wp.zeros(1, dtype=int)
@@ -251,7 +253,7 @@ def rollout_warp(model, trajectory, *, nworld=1, nconmax=256, njmax=1024, progre
       if step % 2000 == 0:
         free = model.joint("cat_free").qposadr[0]
         q = d.qpos.numpy()[0]
-        print(f"t={(step + 1) * model.opt.timestep:.1f}s cat={q[free : free + 3].round(4)}", flush=True)
+        print(f"t={(step + 1) * model.opt.timestep:.1f}s object={q[free : free + 3].round(4)}", flush=True)
         if progress is not None:
           progress((step + 1) * model.opt.timestep)
     trace = {

@@ -1,10 +1,12 @@
-# PiPER H 抓取猫猫演示
+# PiPER H 八叉树 SDF 抓取与性能测试
 
-桌边安装的 PiPER H 六轴机械臂使用双指夹爪，将猫猫手机架抓起、抬升 10 cm、横移 15 cm，再放下、松爪并退回。物体作为自由刚体，通过接触和摩擦被搬运，使用原生 SDF 碰撞。
+默认抓取边长 60 mm、质量 100 g 的方块，执行抬升、横移 15 cm、放下和松爪的 24 秒轨迹。方块来自封闭 OBJ 网格（8 顶点、12 三角形），由 MuJoCo 编译为深度 8 的八叉树 SDF；物体碰撞不是解析 box，也没有使用解析 SDF 插件。手指默认使用完整网格 SDF，可切回原盒体作性能对照。
+
+参数页面的“抓取物体”可切换方块/猫手机支架。旧记录缺少此参数时按猫模型回放。内部 `cat_*` 名称保留以兼容已有回放格式。
 
 ![抓取、抬升、横移和释放](grasp_preview.png)
 
-[查看搬运动画](grasp_preview.webp)。预览来自 Warp 动力学回放。
+[查看搬运动画](grasp_preview.webp)。预览来自旧猫模型及原盒体手指配置，不是当前方块场景。
 
 ## 启动
 
@@ -16,6 +18,12 @@ uv sync --locked --extra dev
 
 # 默认 Warp GPU 后端，原生 MuJoCo 窗口
 uv run python contrib/piper_h/grasp.py
+
+# 原盒体手指对照；方块仍使用八叉树 SDF
+uv run python contrib/piper_h/grasp.py --finger-collision=box
+
+# 切回原猫手机支架
+uv run python contrib/piper_h/grasp.py --object-shape=cat
 
 # MuJoCo CPU 后端
 uv run python contrib/piper_h/grasp.py --engine=c
@@ -47,7 +55,7 @@ uv run python contrib/piper_h/grasp_dashboard.py --host 0.0.0.0
 页面一次只执行一轮仿真，可取消当前运行；完成后保存每个物理步的状态，显示原始物理指标和验收结果，
 并可选择两轮运行对照。回放时由 MuJoCo 按需渲染状态：拖动画面旋转视角、按住 Shift 拖动平移、滚轮缩放，
 时间轴可定位到任意时刻，并可选择 640×480 至 1920×1440 分辨率。旧版历史中的状态文件也可直接回放。
-新运行还会每约 10 ms 保存一次猫与其他物体的真实接触点和作用在猫上的合力。回放中的“显示作用在猫上的接触力”
+新运行还会每约 10 ms 保存一次被抓物体与其他物体的真实接触点和作用在被抓物体上的合力。回放中的“显示作用在物体上的接触力”
 可叠加力箭头，并显示当前采样时刻、接触点数和最大单点合力；蓝色代表桌面，橙色代表夹爪，红色代表其他接触。
 箭头长度可调，最长显示 20 cm，只表示平移力（法向与切向合力），不表示 `condim=4/6` 中的扭转或滚动力矩。
 采样点之间显示最近一次记录的力。旧运行未保存接触力时，页面会提示重新运行；原有状态回放仍可使用。
@@ -57,6 +65,7 @@ uv run python contrib/piper_h/grasp_dashboard.py --host 0.0.0.0
 
 页面开放物体质量、物体与桌面的滑动/扭转/滚动摩擦、接触维数（`condim`，可选 1 / 3 / 4 / 6，默认 6）、接触时间常数、机械臂与夹爪增益和力限制、关节阻尼、重力补偿、
 SDF 深度与查询、物理步长、求解迭代、接触容量和验收阈值；CPU 与 Warp 均可选。
+“手指碰撞模型”可选择 SDF 或原盒体近似，默认 SDF；所选模型随本轮配置保存。旧历史记录缺少该字段时按盒体解释。
 选择 Warp GPU 后，可在“批量仿真”中选择 **1 / 16 / 32 / 64 / 128 / 256** 个并行场景，默认 1。
 这些场景具有相同的参数、初始状态和 24 秒动作轨迹，各自独立求解；GPU 在同一批次内同时推进全部场景。
 MuJoCo CPU 仅支持单场景，切换到 CPU 时场景数自动恢复为 1。
@@ -89,11 +98,12 @@ MuJoCo CPU 仅支持单场景，切换到 CPU 时场景数自动恢复为 1。
 | --- | --- |
 | `grasp.py` | 唯一演示入口：模型配置、IK、控制轨迹、CPU 验证及查看器启动 |
 | `grasp_warp.py` | Warp GPU 仿真与接触记录 |
+| `finger_collision_benchmark.py` | SDF / 盒体手指的完整轨迹与固定姿态碰撞效率对照 |
 | `grasp_viewer.py` | 复用现有查看器，为原生窗口分离物理步进和画面刷新 |
 | `grasp_config.py` / `grasp_dashboard.py` / `grasp_dashboard.html` | 参数校验、局域网运行服务和实验页面 |
-| `grasp_scene.xml` | 桌子、地面、灯光、相机和猫猫 SDF 物体 |
+| `grasp_scene.xml` | 桌子、地面、灯光、相机和方块 SDF 物体 |
 | `piper_h.xml` | 六轴机械臂、夹爪、位置执行器及初始关键帧 |
-| `meshes/` | 机械臂和夹爪 STL、猫猫完整 OBJ |
+| `meshes/` | 机械臂和夹爪 STL、方块 OBJ、猫猫完整 OBJ |
 | `prepare_cat.py` / `cat_provenance.json` | 猫模型转换脚本、来源、坐标换算与哈希 |
 | `grasp_test.py` / `grasp_viewer_test.py` | 资产、模型、完整搬运及原生播放节奏、暂停和单步测试 |
 | `grasp_preview.png` / `grasp_preview.webp` | 抓取预览和动画 |
@@ -109,11 +119,12 @@ MuJoCo CPU 仅支持单场景，切换到 CPU 时场景数自动恢复为 1。
 | 桌面长 × 宽 / 高度 / 厚度 | 1.2 × 0.8 / 0.75 / 0.04 m，四条固定桌腿 |
 | 固定机械臂基座 | `(-0.50, 0, 0.75)`，朝向 +X |
 | 初始六轴关节角 / 夹爪开度 | `[0, 90, -90, 0, 0, 0]°` / 0.08 m |
-| 猫模型尺寸 | 约 46.38 × 102.80 × 76.63 mm，保留原始 Z 向上姿态 |
+| 方块尺寸 / 网格 | 60 × 60 × 60 mm / 8 顶点、12 三角形 |
+| 可选猫模型尺寸 | 约 46.38 × 102.80 × 76.63 mm，保留原始 Z 向上姿态 |
 | 物体质量 / 滑动摩擦 | 0.1 kg / 0.8，可在 `grasp_scene.xml` 调整 |
 | 初始水平包围盒中心 / 最低点 Z | `(-0.16, -0.075)` / `0.7505` m |
 | 搬运目标中心 XY | `(-0.16, 0.075)` m |
-| 抓取 TCP / 抬升目标 Z | `0.79` / `0.89` m |
+| 方块抓取 TCP / 抬升目标 Z | `0.775` / `0.885` m；猫模型为 `0.79` / `0.89` m |
 | 自由度 / 执行器数 | 14 / 7：六轴、两个手指、物体六维自由运动；夹爪共用一个执行器 |
 | 积分器 / 步长 | implicitfast / 0.001 秒 |
 
@@ -129,17 +140,30 @@ MuJoCo CPU 仅支持单场景，切换到 CPU 时场景数自动恢复为 1。
 | 六轴阻尼 / 摩擦损失 / armature | 各轴 0.12 / 0.04 / 0.005 |
 | 夹爪 Kp / Kv / 力限制 | 400 / 4 / ±10 N |
 | 手指阻尼 / 摩擦损失 / armature | 0.1 / 0 / 0.001 |
-| 重力补偿 | 仅机械臂和夹爪启用，猫仍完整承受重力 |
+| 重力补偿 | 仅机械臂和夹爪启用，物体仍完整承受重力 |
 
-这是搬运演示，未实现精确放置的反馈控制。释放后允许数厘米滑动，位置验收容差为 **5 cm**；参考 CPU / Warp 测试误差约为 **2.2 / 3.4 cm**。携带阶段物体最低点离桌面至少 8 cm，持续存在双指接触。碰撞代理、控制增益、质量、摩擦和放置角度补偿均为仿真默认值，不代表真机标定参数；修改后应重新验证。
+这是搬运演示，未实现精确放置的反馈控制。完整验收要求位置误差不超过 **5 cm**、携带阶段物体最低点离桌面至少 8 cm，并持续存在双指接触。碰撞几何、控制增益、质量、摩擦和放置角度补偿均为仿真默认值，不代表真机标定参数。旧猫模型的原盒体配置已存在放置后稳定性验收失败；猫模型换成 SDF 手指后，真实手指凹槽会改变夹持接触，原轨迹还可能在搬运中滑落。保留原验收阈值，性能计时不代表抓取验收通过。
 
 ## SDF 与资产准备
 
-猫模型的碰撞几何为原生 `type="sdf"`，由 MuJoCo 编译网格八叉树。脚本设置 `octree_maxdepth=8`，场景使用 `sdf_initpoints=40`、`sdf_iterations=10`；所有几何体默认使用 `condim=6`，页面每轮运行可统一改为 1 / 3 / 4 / 6。夹爪盒体及桌面盒体直接与物体 SDF 求接触，不使用包围盒或凸包替代物体形状。桌面使用较柔和的接触参数，以缓和落桌冲击。
+所选物体和两根手指的碰撞几何为原生 `type="sdf"`，由 MuJoCo 编译网格八叉树。手指直接使用现有 `gripper_link1.stl` / `gripper_link2.stl` 的完整网格，保留原局部坐标、质量和惯量。脚本对全部 SDF 网格统一设置 `octree_maxdepth=8`，场景使用 `sdf_initpoints=40`、`sdf_iterations=10`；所有几何体默认使用 `condim=6`，页面每轮运行可统一改为 1 / 3 / 4 / 6。SDF 手指与物体采用 SDF–SDF 接触，桌面盒体与物体采用 box–SDF 接触。
 
-为兼容网页查看器，物体外观使用同一个完整网格的独立 `mesh` 几何，质量为零且关闭碰撞；透明的 SDF 几何承担物体质量和全部接触求解。机械臂本体使用圆柱、胶囊近似，夹爪沿用参考模型的盒形接触代理，机械臂视觉 STL 不参与碰撞。
+为兼容网页查看器，物体外观使用同一个完整网格的独立 `mesh` 几何，质量为零且关闭碰撞；透明的 SDF 几何承担物体质量和全部接触求解。手指同样保留独立的无碰撞视觉网格，其质量和惯量由原显式 `inertial` 指定。机械臂本体使用圆柱、胶囊近似，夹爪基座使用盒体。选择 `finger_collision=box` 时，脚本将每根手指替换回原来的根部和指尖两个盒体。
 
-原 STL 有 468,114 个三角面，超过 MuJoCo 的 STL 读取上限。OBJ 已随示例提供；仅需重新生成时运行：
+两根手指各有 2,086 个三角面。源 STL 包含重合接缝和部分多面共享边，未在此修改资产；CPU/Warp 球形探针覆盖手指表面、中央凹槽和外部空域，但不构成对整个网格距离场的误差保证。
+
+### 旧猫模型的手指 SDF / 盒体效率对照
+
+```bash
+uv run python contrib/piper_h/finger_collision_benchmark.py --object-shape=cat --worlds 1 16 64 256 --repeats 3 --output contrib/piper_h/results/finger_collision/comparison.json
+```
+
+完整轨迹测试使用相同的控制输入、步长、质量、惯量、摩擦和容量，交替测试两种手指几何，每组重复三次取中位数。
+计时包含控制更新、GPU 物理步和图提交，排除模型编译、上传、预热及回放记录；编译耗时单独记录。
+另外从盒体运行保存夹紧与携带阶段的固定姿态，两种几何在相同姿态下重复碰撞查询，以避免滑落导致接触减少影响解释。
+原始数据、固定姿态和 Markdown 报告保存在 `results/finger_collision/`，由 Git 忽略，仅保存在本机。
+
+猫模型原 STL 有 468,114 个三角面，超过 MuJoCo 的 STL 读取上限。OBJ 已随示例提供；仅需重新生成时运行：
 
 ```bash
 uv run python contrib/piper_h/prepare_cat.py \
@@ -179,3 +203,33 @@ uv run python contrib/piper_h/parallel_efficiency_benchmark.py
 
 默认输出为 `results/parallel_efficiency/benchmark_results.json`（相对于本示例目录），目录会自动创建。
 可使用 `--output` 指定其他文件名，保留不同轮次的测量结果。
+
+## 方块性能对比
+
+```bash
+uv run python contrib/piper_h/finger_collision_benchmark.py --object-shape=cube --worlds 1 16 64 256 --repeats 3 --output contrib/piper_h/results/cube_sdf/comparison.json
+```
+
+同一方块、同一控制轨迹、相同接触与求解器参数，只切换手指碰撞。每组运行完整 24 秒轨迹三次，报告中位数及原始数据；另在同一保存姿态测纯碰撞查询。模型编译、GPU 上传、预热和回放记录排除在仿真计时之外。抓取验收单独运行，避免物体掉落减少接触计算量却被误判成性能提升。结果保存于 `results/cube_sdf/`，此前猫模型结果保留于 `results/finger_collision/`。
+
+## 单环境 GPU 分项耗时
+
+```bash
+uv run python contrib/piper_h/finger_cost_profile.py --repeats 3 --stride 20
+```
+
+在原 CUDA Graph 内采样碰撞、约束构建、求解、动力学和积分时间，每 20 步采样一次；另跑仅标记物理步起止的对照估计计时影响。各版本使用总 GPU 耗时中位数对应的完整一轮计算分项占比，同时保留全部重复数据。占比分母是 GPU 物理步，不含 CPU 提交、编译或回放；嵌套的 SDF 窄相是碰撞子项，不重复计入。原始采样、汇总 JSON 与报告默认保存到 `results/cube_cost_profile/profile.*`。
+
+### 碰撞内部：粗筛与精细碰撞
+
+```bash
+uv run python contrib/piper_h/collision_cost_profile.py --repeats 3 --stride 20
+```
+
+同一单环境抓取轨迹下，对 `nxn_broadphase`、整个 `_narrowphase` 及 `collision` 总时间分别插入 CUDA events；分项占比以碰撞总耗时为分母。另跑只测碰撞总时间的校准组，结果保存在 `results/cube_collision_profile/profile.*`，包含毫秒/步、占比、各动作阶段和逐轮原始采样。
+
+### 稠密 SDF / 梯度缓存实验
+
+可以把两个手指及方块的原生八叉树预采样为共享的稠密距离＋梯度网格，通过直接索引和三线性插值加速碰撞查询。实验入口、精度限制、显存开销和复现命令见 [DENSE_SDF.md](DENSE_SDF.md)。默认抓取仍使用原生八叉树；实验通过 `attach_dense_sdf` 显式启用。
+
+盒体手指／全部八叉树／全部稠密三版本的统一轮换测量使用 `three_way_benchmark.py`，覆盖 1 和 512 环境、完整抓取验收、碰撞分项及固定姿态对照。审查修复记录和复测结果见 [REVIEW_20260929.md](REVIEW_20260929.md)。

@@ -4,6 +4,22 @@ import math
 
 FIELDS = [
   {
+    "key": "object_shape",
+    "label": "抓取物体",
+    "group": "物体与接触",
+    "default": "cube",
+    "choices": ["cube", "cat"],
+    "choice_labels": {"cube": "方块（网格八叉树 SDF）", "cat": "猫手机支架（网格八叉树 SDF）"},
+  },
+  {
+    "key": "finger_collision",
+    "label": "手指碰撞模型",
+    "group": "机械臂与夹爪",
+    "default": "sdf",
+    "choices": ["sdf", "box"],
+    "choice_labels": {"sdf": "SDF（完整手指网格）", "box": "盒体（原始近似）"},
+  },
+  {
     "key": "nworld",
     "label": "并行仿真场景数",
     "group": "批量仿真",
@@ -109,6 +125,11 @@ def validate_config(raw):
   for field in FIELDS:
     key = field["key"]
     value = raw.get(key, field["default"])
+    if isinstance(field["default"], str):
+      if value not in field["choices"]:
+        raise ValueError(f"{key} 只能是 {', '.join(field['choices'])}")
+      result[key] = value
+      continue
     items = value if isinstance(field["default"], list) else [value]
     if isinstance(field["default"], list) and (not isinstance(value, list) or len(value) != 6):
       raise ValueError(f"{key} 必须恰好有六个数值")

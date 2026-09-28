@@ -34,6 +34,8 @@ def test_config_validation():
     {"nworld": True},
     {"nworld": 512},
     {"engine": "c", "nworld": 16},
+    {"finger_collision": "mesh"},
+    {"finger_collision": 1},
   ):
     with pytest.raises(ValueError):
       validate_config(invalid)
@@ -44,6 +46,8 @@ def test_config_validation():
   assert validate_config({})["table_rolling_friction"] == 0.0001
   assert validate_config({"condim": 3})["condim"] == 3
   assert validate_config({})["nworld"] == 1
+  assert validate_config({})["finger_collision"] == "sdf"
+  assert validate_config({"finger_collision": "box"})["finger_collision"] == "box"
   for nworld in (16, 32, 64, 128, 256):
     assert validate_config({"engine": "warp", "nworld": nworld})["nworld"] == nworld
 
@@ -97,7 +101,7 @@ def test_model_overrides():
   table_contacts = [contact for contact in data.contact if set(contact.geom) == {cat, table}]
   assert table_contacts
   assert table_contacts[0].friction == pytest.approx([0.6, 0.6, 0.016, 0.0006, 0.0006])
-  mesh = model.mesh("cat_phone_stand").id
+  mesh = model.mesh("grasp_cube").id
   start, count = model.mesh_octadr[mesh], model.mesh_octnum[mesh]
   assert model.oct_depth[start : start + count].max() == 5
   assert grasp.make_trajectory(model)["ctrl"].shape[0] == 12001
@@ -271,7 +275,7 @@ def test_replay_renders_saved_state(tmp_path, monkeypatch):
   second, _ = replay.render(run_id, settings)
   assert Image.open(io.BytesIO(first)).size == (640, 480)
   assert first != second
-  assert model_configs == [{"sdf_depth": 5, "nworld": 16}]
+  assert model_configs == [{"sdf_depth": 5, "nworld": 16, "finger_collision": "box", "object_shape": "cat"}]
   other_world = grasp_dashboard.world_directory(directory, 16)
   other_world.mkdir(parents=True)
   np.savez_compressed(other_world / "trace.npz", qpos=np.array([[-0.5], [-1.0]]), qvel=np.zeros((2, 1)))

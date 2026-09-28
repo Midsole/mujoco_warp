@@ -52,6 +52,20 @@ class AABB:
 
 
 @wp.struct
+class DenseSDF:
+  """Optional per-mesh dense distance/gradient grids, shared by all worlds."""
+
+  values: wp.array[wp.vec4]
+  offsets: wp.array[int]
+  dims: wp.array[wp.vec3i]
+  lower: wp.array[wp.vec3]
+  inv_cell: wp.array[wp.vec3]
+  cell_gradients: wp.array[wp.vec3]
+  gradient_offsets: wp.array[int]
+  cell_gradient: bool
+
+
+@wp.struct
 class VolumeData:
   center: wp.vec3
   half_size: wp.vec3
@@ -60,6 +74,15 @@ class VolumeData:
   oct_coeff: wp.array[vec8]
   root: int = 0
   valid: bool = False
+  dense_values: wp.array[wp.vec4]
+  dense_valid: bool
+  dense_offset: int
+  dense_dims: wp.vec3i
+  dense_lower: wp.vec3
+  dense_inv_cell: wp.vec3
+  dense_cell_gradients: wp.array[wp.vec3]
+  dense_gradient_offset: int
+  dense_cell_gradient: bool
 
 
 @wp.struct
@@ -434,8 +457,72 @@ def box_project(center: wp.vec3, half_size: wp.vec3, xyz: wp.vec3) -> Tuple[floa
 
 
 @wp.func
+def attach_dense(volume: VolumeData, grids: DenseSDF, mesh_id: int) -> VolumeData:
+  if mesh_id >= 0 and mesh_id < grids.offsets.shape[0]:
+    offset = grids.offsets[mesh_id]
+    if offset >= 0 and volume.valid:
+      volume.dense_valid = True
+      volume.dense_values = grids.values
+      volume.dense_offset = offset
+      volume.dense_dims = grids.dims[mesh_id]
+      volume.dense_lower = grids.lower[mesh_id]
+      volume.dense_inv_cell = grids.inv_cell[mesh_id]
+      volume.dense_cell_gradient = grids.cell_gradient
+      if grids.cell_gradient:
+        volume.dense_cell_gradients = grids.cell_gradients
+        volume.dense_gradient_offset = grids.gradient_offsets[mesh_id]
+  return volume
+
+
+@wp.func
+def sample_dense(xyz: wp.vec3, volume: VolumeData) -> wp.vec4:
+  """Interpolate cached distance and unnormalized gradient in the mesh frame."""
+  coord = wp.cw_mul(xyz - volume.dense_lower, volume.dense_inv_cell)
+  dims = volume.dense_dims
+  base = wp.vec3i(0)
+  frac = wp.vec3(0.0)
+  for axis in range(3):
+    x = wp.clamp(coord[axis], 0.0, float(dims[axis] - 1))
+    base[axis] = wp.min(int(wp.floor(x)), dims[axis] - 2)
+    frac[axis] = x - float(base[axis])
+  result = wp.vec4(0.0)
+  for corner in range(8):
+    dx = corner & 1
+    dy = (corner >> 1) & 1
+    dz = (corner >> 2) & 1
+    weight = frac[0] if dx else 1.0 - frac[0]
+    weight *= frac[1] if dy else 1.0 - frac[1]
+    weight *= frac[2] if dz else 1.0 - frac[2]
+    index = ((base[0] + dx) * dims[1] + base[1] + dy) * dims[2] + base[2] + dz
+    result += weight * volume.dense_values[volume.dense_offset + index]
+  return result
+
+
+@wp.func
+def sample_dense_cell_gradient(xyz: wp.vec3, volume: VolumeData) -> wp.vec3:
+  """Evaluate precomputed derivatives of this cell's trilinear distance polynomial."""
+  coord = wp.cw_mul(xyz - volume.dense_lower, volume.dense_inv_cell)
+  dims = volume.dense_dims
+  base = wp.vec3i(0)
+  frac = wp.vec3(0.0)
+  for axis in range(3):
+    x = wp.clamp(coord[axis], 0.0, float(dims[axis] - 1))
+    base[axis] = wp.min(int(wp.floor(x)), dims[axis] - 2)
+    frac[axis] = x - float(base[axis])
+  offset = volume.dense_gradient_offset + 4 * ((base[0] * (dims[1] - 1) + base[1]) * (dims[2] - 1) + base[2])
+  x, y, z = frac[0], frac[1], frac[2]
+  gradient = volume.dense_cell_gradients[offset]
+  gradient += wp.cw_mul(volume.dense_cell_gradients[offset + 1], wp.vec3(y, x, x))
+  gradient += wp.cw_mul(volume.dense_cell_gradients[offset + 2], wp.vec3(z, z, y))
+  gradient += wp.cw_mul(volume.dense_cell_gradients[offset + 3], wp.vec3(y * z, x * z, x * y))
+  return gradient
+
+
+@wp.func
 def sample_volume_sdf(xyz: wp.vec3, volume_data: VolumeData) -> float:
   dist0, point = box_project(volume_data.center, volume_data.half_size, xyz)
+  if volume_data.dense_valid:
+    return dist0 + sample_dense(point, volume_data)[0]
   node, weights = find_oct(volume_data.oct_child, volume_data.oct_aabb, point, grad=False, root=volume_data.root)
   return dist0 + wp.dot(weights[0], volume_data.oct_coeff[node])
 
@@ -453,6 +540,11 @@ def sample_volume_grad(xyz: wp.vec3, volume_data: VolumeData) -> wp.vec3:
     grad_y = (sample_volume_sdf(xyz + dy, volume_data) - f) / h
     grad_z = (sample_volume_sdf(xyz + dz, volume_data) - f) / h
     return wp.vec3(grad_x, grad_y, grad_z)
+  if volume_data.dense_valid:
+    if volume_data.dense_cell_gradient:
+      return sample_dense_cell_gradient(point, volume_data)
+    value = sample_dense(point, volume_data)
+    return wp.vec3(value[1], value[2], value[3])
   node, weights = find_oct(volume_data.oct_child, volume_data.oct_aabb, point, grad=True, root=volume_data.root)
   grad_x = wp.dot(weights[0], volume_data.oct_coeff[node])
   grad_y = wp.dot(weights[1], volume_data.oct_coeff[node])
@@ -797,6 +889,7 @@ def _sdf_narrowphase(
   naconmax_in: int,
   ncollision_in: wp.array[int],
   # In:
+  dense_grids: DenseSDF,
   collision_pair_in: wp.array[wp.vec2i],
   collision_pairid_in: wp.array[wp.vec2i],
   collision_worldid_in: wp.array[int],
@@ -939,6 +1032,9 @@ def _sdf_narrowphase(
     geom_dataid[dataid_setid, g2],
   )
 
+  volume_data1 = attach_dense(volume_data1, dense_grids, geom_dataid[dataid_setid, g1])
+  volume_data2 = attach_dense(volume_data2, dense_grids, geom_dataid[dataid_setid, g2])
+
   mesh_data1.nmeshface = nmeshface
   mesh_data1.mesh_vertadr = mesh_vertadr
   mesh_data1.mesh_vert = mesh_vert
@@ -1080,6 +1176,7 @@ def sdf_narrowphase(m: Model, d: Data, ctx: CollisionContext):
       d.geom_xmat,
       d.naconmax,
       d.ncollision,
+      getattr(m, "dense_sdf", DenseSDF()),
       ctx.collision_pair,
       ctx.collision_pairid,
       ctx.collision_worldid,

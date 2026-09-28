@@ -38,7 +38,8 @@ def test_lossless_conversion(tmp_path):
   assert metadata["triangles"] == 4 and metadata["nonmanifold_edges"] == 0
 
 
-def test_asset_model_and_replay(model, tmp_path):
+def test_asset_model_and_replay(tmp_path):
+  model = grasp.build_model({"object_shape": "cat"})
   directory = grasp.SCENE.parent
   for record, urdf in (("provenance.json", "piper_h.urdf"), ("gripper_provenance.json", "piper_h_with_gripper.urdf")):
     provenance = json.loads((directory / record).read_text())
@@ -115,6 +116,63 @@ def probe_model():
   return spec.compile()
 
 
+def test_finger_collision_models_preserve_dynamics():
+  sdf = grasp.build_model({"finger_collision": "sdf", "sdf_depth": 5})
+  box = grasp.build_model({"finger_collision": "box", "sdf_depth": 5})
+  for field in ("body_mass", "body_inertia", "body_ipos", "body_iquat", "qpos0", "jnt_range", "actuator_gainprm"):
+    np.testing.assert_array_equal(getattr(sdf, field), getattr(box, field))
+  for name in ("gripper_link1", "gripper_link2"):
+    for model, expected_count in ((sdf, 1), (box, 2)):
+      body = model.body(name).id
+      active = np.flatnonzero((model.geom_bodyid == body) & (model.geom_contype != 0))
+      assert len(active) == expected_count
+      assert model.geom(f"{name}_visual").contype == 0
+    geom = sdf.geom(f"{name}_collision")
+    mesh = sdf.mesh(f"{name}_mesh").id
+    assert geom.type == mujoco.mjtGeom.mjGEOM_SDF and geom.dataid == mesh
+    start, count = sdf.mesh_octadr[mesh], sdf.mesh_octnum[mesh]
+    assert count > 0 and sdf.oct_depth[start : start + count].max() == 5
+    np.testing.assert_allclose(geom.pos, sdf.geom(f"{name}_visual").pos)
+    np.testing.assert_allclose(geom.quat, sdf.geom(f"{name}_visual").quat)
+    for part, pos, size in (
+      ("root", [0, -0.0125, 0.004], [0.012, 0.0125, 0.004]),
+      ("tip", [0, -0.050, 0.012], [0.018, 0.025, 0.01]),
+    ):
+      geom = box.geom(f"{name}_{part}_collision")
+      assert geom.type == mujoco.mjtGeom.mjGEOM_BOX
+      np.testing.assert_allclose(geom.pos, pos)
+      np.testing.assert_allclose(geom.size, size)
+
+
+@pytest.mark.parametrize("finger", [1, 2])
+def test_finger_sdf_surface_and_gap(finger):
+  asset = grasp.SCENE.parent / f"meshes/gripper_link{finger}.stl"
+  spec = mujoco.MjSpec.from_string(f'''<mujoco>
+    <option sdf_initpoints="40" sdf_iterations="10"/>
+    <asset><mesh name="finger" file="{asset}"/></asset>
+    <worldbody>
+      <geom type="sdf" mesh="finger"/>
+      <body pos="1 0 0"><freejoint/><geom type="sphere" size=".0005" mass=".001"/></body>
+    </worldbody>
+  </mujoco>''')
+  spec.meshes[0].octree_maxdepth = 8
+  model = spec.compile()
+  data = mujoco.MjData(model)
+  # The old tip box fills the central recess; the full mesh leaves it open.
+  for point, expected in (([0, -0.05, 0.01], False), ([0.018, -0.05, 0.008], True), ([0.04, -0.05, 0.01], False)):
+    data.qpos[:3] = point
+    mujoco.mj_forward(model, data)
+    assert bool(data.ncon) == expected
+    if wp.is_cuda_available():
+      with wp.ScopedDevice("cuda:0"):
+        m = mjw.put_model(model)
+        d = mjw.put_data(model, data, nworld=1, nconmax=128, njmax=256)
+        mjw.collision(m, d)
+        count = int(d.nacon.numpy()[0])
+        assert bool(count) == expected
+        assert np.isfinite(d.contact.dist.numpy()[:count]).all()
+
+
 @pytest.mark.parametrize("gpu", [False, True], ids=["cpu", "warp"])
 def test_sdf_concavity_and_surface(probe_model, gpu):
   if gpu and not wp.is_cuda_available():
@@ -165,3 +223,20 @@ def test_complete_transport(model, engine):
   free = model.joint("cat_free").qposadr[0]
   failed["qpos"][:, free + 2] = 0.75
   assert not grasp.validate(model, trajectory, failed)["passed"]
+
+
+@pytest.mark.parametrize("finger_collision", ["box", "sdf"])
+def test_cube_uses_mesh_octree(finger_collision):
+  model = grasp.build_model({"finger_collision": finger_collision})
+  geom = model.geom("cat_sdf")
+  mesh = model.mesh("grasp_cube")
+  assert geom.type[0] == mujoco.mjtGeom.mjGEOM_SDF
+  assert model.geom_plugin[geom.id] == -1 and model.nplugin == 0
+  assert geom.dataid[0] == mesh.id
+  assert mesh.vertnum[0] == 8 and mesh.facenum[0] == 12
+  start, count = model.mesh_octadr[mesh.id], model.mesh_octnum[mesh.id]
+  assert count > 0 and model.oct_depth[start : start + count].max() == 8
+  body = model.body("cat_phone_stand")
+  assert body.mass[0] == pytest.approx(0.1)
+  np.testing.assert_allclose(body.inertia, np.full(3, 0.1 * 0.06**2 / 6), rtol=1e-6)
+  assert not np.any(model.geom_type[model.geom_bodyid == body.id] == mujoco.mjtGeom.mjGEOM_BOX)

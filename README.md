@@ -79,9 +79,11 @@ MuJoCo Warp simulates many kinds of physical systems, from rigid bodies with con
 
 Each of these scenes is benchmarked nightly and the [results are published nightly](https://google-deepmind.github.io/mujoco_warp/nightly/).
 
-## PiPER H cat grasping demo
+## PiPER H octree SDF grasping demo
 
-A table-mounted PiPER H with a parallel gripper picks up a cat-shaped phone stand, moves it 15 cm, and releases it onto the table. The object uses native SDF collisions and is carried by contact and friction. This standalone example is not part of the benchmark suite.
+A table-mounted PiPER H with a parallel gripper picks up a 60 mm cube (or an optional cat-shaped phone stand), moves it 15 cm, and releases it onto the table. The cube is a closed 12-triangle mesh compiled into a depth-8 octree SDF, without an analytic box or SDF plugin. The object uses native SDF collisions and is carried by contact and friction. This standalone example is not part of the benchmark suite.
+
+Finger collisions now default to native SDFs of the complete finger meshes. Use `--finger-collision=box` for the original proxies shown in the preview. The old cat trajectory can slip with SDF fingers; the usage guide includes a reproducible collision-performance comparison.
 
 ![PiPER H grasping and transporting the cat](contrib/piper_h/grasp_preview.png)
 

@@ -1,4 +1,4 @@
-"""Pick and place the full-resolution cat mesh using native SDF contacts."""
+"""Pick and place a cube or cat mesh using native octree SDF contacts."""
 
 import argparse
 import json
@@ -22,17 +22,38 @@ ARM_ACTUATORS = tuple(f"position{i}" for i in range(1, 7))
 
 def build_model(config=None):
   config = validate_config(config or {})
-  if not SCENE.with_name("meshes").joinpath("cat_phone_stand.obj").exists():
+  if config["object_shape"] == "cat" and not SCENE.with_name("meshes").joinpath("cat_phone_stand.obj").exists():
     raise FileNotFoundError("Run prepare_cat.py --source /path/to/cat_phone_stand.stl first")
   spec = mujoco.MjSpec.from_file(str(SCENE))
+  if config["object_shape"] == "cat":
+    object_mesh = spec.mesh("grasp_cube")
+    object_mesh.name = "cat_phone_stand"
+    object_mesh.file = "cat_phone_stand.obj"
+    for name in ("cat_sdf", "cat_visual"):
+      spec.geom(name).meshname = "cat_phone_stand"
+  if config["finger_collision"] == "box":
+    for name in ("gripper_link1", "gripper_link2"):
+      spec.delete(spec.geom(f"{name}_collision"))
+      for part, pos, size in (
+        ("root", [0, -0.0125, 0.004], [0.012, 0.0125, 0.004]),
+        ("tip", [0, -0.050, 0.012], [0.018, 0.025, 0.01]),
+      ):
+        spec.body(name).add_geom(
+          name=f"{name}_{part}_collision",
+          default=spec.find_default("collision"),
+          type=mujoco.mjtGeom.mjGEOM_BOX,
+          pos=pos,
+          size=size,
+        )
   spec.option.timestep = config["timestep"]
   spec.option.iterations = config["solver_iterations"]
   spec.option.sdf_initpoints = config["sdf_initpoints"]
   spec.option.sdf_iterations = config["sdf_iterations"]
   spec.nconmax = config["nconmax"]
   spec.njmax = config["njmax"]
+  sdf_meshes = {geom.meshname for geom in spec.geoms if geom.type == mujoco.mjtGeom.mjGEOM_SDF}
   for mesh in spec.meshes:
-    if mesh.name == "cat_phone_stand":
+    if mesh.name in sdf_meshes:
       mesh.octree_maxdepth = config["sdf_depth"]
   # Set this before compiling so CPU's ngravcomp and Warp agree.
   robot_names = {"base_link", "flange_link", "gripper_base", "gripper_link1", "gripper_link2"}
@@ -120,6 +141,9 @@ def make_trajectory(model):
   pick_tcp = PICK
   place_tcp = PLACE + [-0.0006, 0.0022]
   targets = [(*pick_tcp, 0.90), (*pick_tcp, 0.79), (*pick_tcp, 0.89), (*PLACE, 0.89), (*place_tcp, 0.7988), (*place_tcp, 0.90)]
+  cube = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, "grasp_cube") >= 0
+  if cube:
+    targets = [(*PICK, 0.90), (*PICK, 0.775), (*PICK, 0.885), (*PLACE, 0.885), (*PLACE, 0.775), (*PLACE, 0.90)]
   seed = np.array([0, 1.3, -1.3, 0, 1.2, 1.57])
   poses = []
   held_quat = np.empty(4)
@@ -130,7 +154,7 @@ def make_trajectory(model):
   mujoco.mju_quat2Mat(held_rotation, held_quat)
   drop_rotation = held_rotation.reshape(3, 3).T @ np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1.0]])
   for index, target in enumerate(targets):
-    seed = inverse_kinematics(model, target, seed, rotation=drop_rotation if index >= 4 else None)
+    seed = inverse_kinematics(model, target, seed, rotation=drop_rotation if index >= 4 and not cube else None)
     poses.append(seed)
   above, grasp, lift, transfer, place, retreat = poses
   qkeys = np.array([home, home, above, grasp, grasp, lift, transfer, place, place, place, retreat, retreat])
@@ -208,7 +232,7 @@ def rollout_cpu(model, trajectory, progress=None, record_contact_forces=False):
         contact_counts[sample] += 1
     if step % 2000 == 0:
       free = model.joint("cat_free").qposadr[0]
-      print(f"t={data.time:.1f}s cat={data.qpos[free : free + 3].round(4)} contacts={contacts[step]}", flush=True)
+      print(f"t={data.time:.1f}s object={data.qpos[free : free + 3].round(4)} contacts={contacts[step]}", flush=True)
       if progress is not None:
         progress(float(data.time))
   trace = {"qpos": positions, "qvel": velocities, "force": forces, "contacts": contacts, "warnings": data.warning.number.copy()}
@@ -232,7 +256,13 @@ def validate(model, trajectory, trace, config=None):
   carried = (times >= 10.5) & (times <= 14)
   final = times >= 23
   contact = trace["contacts"]
-  bounds = np.array(json.loads(SCENE.with_name("cat_provenance.json").read_text())["bounds_m"])
+  geom = model.geom("cat_sdf")
+  mesh = model.mesh(int(geom.dataid[0]))
+  vertices = model.mesh_vert[mesh.vertadr[0] : mesh.vertadr[0] + mesh.vertnum[0]]
+  rotation = np.empty(9)
+  mujoco.mju_quat2Mat(rotation, geom.quat)
+  vertices = vertices @ rotation.reshape(3, 3).T + geom.pos
+  bounds = np.array([vertices.min(axis=0), vertices.max(axis=0)])
   quat = trace["qpos"][:, free + 3 : free + 7]
   w, x, y, z = quat.T
   rotation_z = np.column_stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)])
@@ -282,9 +312,11 @@ def main():
   parser.add_argument("--engine", choices=("warp", "c"), default="warp")
   parser.add_argument("--viewer", choices=("mujoco", "viser"), default="mujoco")
   parser.add_argument("--headless", action="store_true", help="run and validate a complete pick-and-place without a window")
+  parser.add_argument("--finger-collision", choices=("sdf", "box"), default="sdf")
+  parser.add_argument("--object-shape", choices=("cube", "cat"), default="cube")
   args = parser.parse_args()
-  print("正在编译猫模型的 SDF 八叉树，请稍候……", flush=True)
-  model = build_model()
+  print("正在编译碰撞模型的 SDF 八叉树，请稍候……", flush=True)
+  model = build_model({"finger_collision": args.finger_collision, "object_shape": args.object_shape})
   print("正在生成抓取轨迹……", flush=True)
   trajectory = make_trajectory(model)
   if args.headless:

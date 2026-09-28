@@ -159,7 +159,8 @@ def run_worker(root, run_id):
         os.environ.setdefault("MUJOCO_GL", "egl")
         import grasp
 
-        config = validate_config(read_json(run_dir / "config.json"))
+        saved_config = read_json(run_dir / "config.json")
+        config = validate_config({"finger_collision": "box", "object_shape": "cat", **saved_config})
         stage(1, state="running")
         model = grasp.build_model(config)
         stage(2)
@@ -282,7 +283,7 @@ class ReplayRenderer:
       try:
         if run_id not in cached:
           directory = self.root / run_id
-          config = read_json(directory / "config.json")
+          config = {"finger_collision": "box", "object_shape": "cat", **read_json(directory / "config.json")}
           # Replay uses recorded qpos/qvel, so contact resolution cannot change motion.
           # Keep the same visible meshes while avoiding a slow deep SDF rebuild.
           model = grasp.build_model({**config, "sdf_depth": 5})
@@ -408,7 +409,7 @@ class RunManager:
     if not (directory / "status.json").exists():
       return None
     run = read_json(directory / "status.json")
-    run["config"] = read_json(directory / "config.json")
+    run["config"] = {"finger_collision": "box", "object_shape": "cat", **read_json(directory / "config.json")}
     if (directory / "metrics.json").exists():
       run["metrics"] = read_json(directory / "metrics.json")
     run["replay_ready"] = (directory / "trace.npz").exists()

@@ -107,7 +107,7 @@
       <div id="field-groups"></div>
       <p class="muted" id="batch-notice" role="status" aria-live="polite"></p>
       <p class="notice" id="contact-time-notice" role="status" aria-live="polite"></p>
-      <p class="muted">动作轨迹保持当前 24 秒基线。猫与桌面接触采用桌面系数，猫与夹爪接触采用猫的系数。验收标准只影响通过判定，不改变仿真运动。</p>
+      <p class="muted">动作轨迹保持当前 24 秒基线。物体与桌面接触采用桌面系数，物体与夹爪接触采用物体的系数。验收标准只影响通过判定，不改变仿真运动。</p>
       <div class="toolbar"><button class="primary" id="start">开始仿真</button><button id="reset">恢复默认值</button></div>
       <p id="form-message" role="status"></p>
     </section>
@@ -174,7 +174,8 @@
             const select = document.createElement('select'); select.dataset.key = field.key;
             select.setAttribute('aria-label', field.label);
             for (const choice of field.choices) {
-              const option = document.createElement('option'); option.value = choice; option.textContent = choice;
+              const option = document.createElement('option'); option.value = choice;
+              option.textContent = field.choice_labels?.[choice] || choice;
               select.append(option);
             }
             select.value = field.default; container.append(select);
@@ -189,6 +190,11 @@
             });
           }
           box.append(container);
+          if (field.key === 'finger_collision') {
+            const guide = document.createElement('small'); guide.className = 'muted';
+            guide.textContent = 'SDF 保留完整手指凹槽；旧猫模型轨迹可能在搬运中滑落。可选择原盒体进行对照。';
+            box.append(guide);
+          }
           if (field.key === 'condim') {
             const guide = document.createElement('div'); guide.className = 'condim-guide';
             guide.innerHTML = `<strong>condim 与摩擦项</strong>
@@ -274,6 +280,10 @@
       for (const field of fields.values()) {
         const values = [...document.querySelectorAll(`[data-key="${field.key}"]`)].map(input => {
           if (input.value.trim() === '') throw new Error(`${field.label} 不能为空`);
+          if (typeof field.default === 'string') {
+            if (!field.choices.includes(input.value)) throw new Error(`${field.label} 超出有效范围`);
+            return input.value;
+          }
           const number = Number(input.value);
           if (!Number.isFinite(number) || number < field.min || number > field.max ||
               (field.integer && !Number.isInteger(number)) ||
@@ -366,7 +376,7 @@
       const forceLabel = document.createElement('label');
       const showForces = document.createElement('input'); showForces.type = 'checkbox';
       showForces.disabled = !run.contact_forces_ready;
-      forceLabel.append(showForces, document.createTextNode('显示作用在猫上的接触力'));
+      forceLabel.append(showForces, document.createTextNode('显示作用在物体上的接触力'));
       forceControls.append(forceLabel);
       const scaleLabel = document.createElement('label'); scaleLabel.textContent = '箭头比例';
       const forceScale = document.createElement('select'); forceScale.setAttribute('aria-label', '接触力箭头比例');

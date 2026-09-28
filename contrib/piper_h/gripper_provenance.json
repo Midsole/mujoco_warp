@@ -19,6 +19,7 @@
   "mjcf_adaptations": [
     "Preserve flange and gripper joint transforms, limits, masses and full inertia tensors.",
     "Retain two physical slides; enforce opposite displacements with a joint equality and drive their difference as nominal opening (0-0.1 m).",
-    "Collision primitives follow PhysicalEngine/piper.py; position servo and coupling are simulation defaults."
+    "Arm and gripper-base collision primitives follow PhysicalEngine/piper.py; position servo and coupling are simulation defaults.",
+    "Finger collisions default to native SDFs of the unchanged gripper_link1/2 STL meshes; finger_collision=box restores the original two-box proxies per finger."
   ]
 }
