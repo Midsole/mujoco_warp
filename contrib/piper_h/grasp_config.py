@@ -1,6 +1,10 @@
 """Validated settings for repeatable PiPER H grasp experiments."""
 
 import math
+import re
+
+WORLD_COUNTS = (1, 16, 32, 64, 128, 256, 512, 1024)
+MAX_WORLDS = max(WORLD_COUNTS)
 
 FIELDS = [
   {
@@ -16,8 +20,8 @@ FIELDS = [
     "label": "抓取物体",
     "group": "物体与接触",
     "default": "cube",
-    "choices": ["cube", "cat"],
-    "choice_labels": {"cube": "方块（网格 SDF）", "cat": "猫手机支架（网格 SDF）"},
+    "choices": ["cube", "cat", "uploaded"],
+    "choice_labels": {"cube": "方块（网格 SDF）", "cat": "猫手机支架（网格 SDF）", "uploaded": "上传 STL（网格 SDF）"},
   },
   {
     "key": "finger_collision",
@@ -33,9 +37,9 @@ FIELDS = [
     "group": "批量仿真",
     "default": 1,
     "min": 1,
-    "max": 256,
+    "max": MAX_WORLDS,
     "integer": True,
-    "choices": [1, 16, 32, 64, 128, 256],
+    "choices": list(WORLD_COUNTS),
   },
   {"key": "cat_mass", "label": "物体质量 (kg)", "group": "物体与接触", "default": 0.1, "min": 0.005, "max": 2},
   {
@@ -117,7 +121,7 @@ FIELDS = [
   {"key": "maximum_final_drift", "label": "最终漂移上限 (m)", "group": "验收标准", "default": 0.005, "min": 0, "max": 0.1},
 ]
 
-DEFAULTS = {field["key"]: field["default"] for field in FIELDS}
+DEFAULTS = {**{field["key"]: field["default"] for field in FIELDS}, "object_id": ""}
 ENGINES = ("c", "warp")
 
 
@@ -131,7 +135,10 @@ def validate_config(raw):
   engine = raw.get("engine", "warp")
   if engine not in ENGINES:
     raise ValueError("engine 必须是 c 或 warp")
-  result = {"engine": engine}
+  object_id = raw.get("object_id", "")
+  if not isinstance(object_id, str) or (object_id and not re.fullmatch(r"[0-9a-f]{32}", object_id)):
+    raise ValueError("上传物体编号无效")
+  result = {"engine": engine, "object_id": object_id}
   for field in FIELDS:
     key = field["key"]
     value = raw.get(key, field["default"])
@@ -157,6 +164,8 @@ def validate_config(raw):
         raise ValueError(f"{key} 必须是有限数值")
       checked.append(item)
     result[key] = checked if isinstance(field["default"], list) else checked[0]
+  if result["object_shape"] == "uploaded" and not object_id:
+    raise ValueError("请先上传 STL 或选择已有上传物体")
   if engine == "c" and result["nworld"] != 1:
     raise ValueError("批量仿真需要 Warp GPU 后端；MuJoCo CPU 仅支持 1 个场景")
   if engine == "c":

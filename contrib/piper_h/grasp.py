@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import mujoco
@@ -21,7 +22,7 @@ ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 7))
 ARM_ACTUATORS = tuple(f"position{i}" for i in range(1, 7))
 
 
-def build_model(config=None):
+def build_model(config=None, *, object_path=None):
   # Native scripts retain their 1 ms baseline; the dashboard passes its full configuration.
   config = validate_config({"timestep": 0.001, **(config or {})})
   if config["object_shape"] == "cat" and not SCENE.with_name("meshes").joinpath("cat_phone_stand.obj").exists():
@@ -33,6 +34,14 @@ def build_model(config=None):
     object_mesh.file = "cat_phone_stand.obj"
     for name in ("cat_sdf", "cat_visual"):
       spec.geom(name).meshname = "cat_phone_stand"
+  elif config["object_shape"] == "uploaded":
+    if object_path is None or not Path(object_path).is_file():
+      raise ValueError("上传物体网格不存在")
+    object_mesh = spec.mesh("grasp_cube")
+    object_mesh.name = "uploaded_object"
+    object_mesh.file = str(Path(object_path).resolve())
+    for name in ("cat_sdf", "cat_visual"):
+      spec.geom(name).meshname = "uploaded_object"
   if config["finger_collision"] == "box":
     for name in ("gripper_link1", "gripper_link2"):
       spec.delete(spec.geom(f"{name}_collision"))
@@ -135,6 +144,17 @@ def inverse_kinematics(model, position, seed, rotation=None):
   raise ValueError(f"Unreachable grasp waypoint: {position}")
 
 
+def object_bounds(model):
+  """Return object mesh bounds in the free body's reference frame."""
+  geom = model.geom("cat_sdf")
+  mesh = model.mesh(int(geom.dataid[0]))
+  vertices = model.mesh_vert[mesh.vertadr[0] : mesh.vertadr[0] + mesh.vertnum[0]]
+  rotation = np.empty(9)
+  mujoco.mju_quat2Mat(rotation, geom.quat)
+  vertices = vertices @ rotation.reshape(3, 3).T + geom.pos
+  return np.array([vertices.min(axis=0), vertices.max(axis=0)])
+
+
 def make_trajectory(model, config=None):
   """Build the native 24 s baseline, or rescale and hold targets for a configured run."""
   addresses = np.array([model.joint(name).qposadr[0] for name in ARM_JOINTS])
@@ -145,8 +165,18 @@ def make_trajectory(model, config=None):
   place_tcp = PLACE + [-0.0006, 0.0022]
   targets = [(*pick_tcp, 0.90), (*pick_tcp, 0.79), (*pick_tcp, 0.89), (*PLACE, 0.89), (*place_tcp, 0.7988), (*place_tcp, 0.90)]
   cube = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, "grasp_cube") >= 0
+  uploaded = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_MESH, "uploaded_object") >= 0
+  opening = 0.08
   if cube:
     targets = [(*PICK, 0.90), (*PICK, 0.775), (*PICK, 0.885), (*PLACE, 0.885), (*PLACE, 0.775), (*PLACE, 0.90)]
+  elif uploaded:
+    bounds = object_bounds(model)
+    width, _, height = bounds[1] - bounds[0]
+    grasp_z = max(TABLE_HEIGHT + 0.016, TABLE_HEIGHT + height / 2 - 0.005)
+    above_z = max(0.90, TABLE_HEIGHT + height + 0.07)
+    lift_z = grasp_z + 0.11
+    targets = [(*PICK, above_z), (*PICK, grasp_z), (*PICK, lift_z), (*PLACE, lift_z), (*PLACE, grasp_z), (*PLACE, above_z)]
+    opening = min(0.1, max(0.03, width + 0.02))
   seed = np.array([0, 1.3, -1.3, 0, 1.2, 1.57])
   poses = []
   held_quat = np.empty(4)
@@ -157,11 +187,11 @@ def make_trajectory(model, config=None):
   mujoco.mju_quat2Mat(held_rotation, held_quat)
   drop_rotation = held_rotation.reshape(3, 3).T @ np.array([[0, 1, 0], [1, 0, 0], [0, 0, -1.0]])
   for index, target in enumerate(targets):
-    seed = inverse_kinematics(model, target, seed, rotation=drop_rotation if index >= 4 and not cube else None)
+    seed = inverse_kinematics(model, target, seed, rotation=drop_rotation if index >= 4 and not (cube or uploaded) else None)
     poses.append(seed)
   above, grasp, lift, transfer, place, retreat = poses
   qkeys = np.array([home, home, above, grasp, grasp, lift, transfer, place, place, place, retreat, retreat])
-  openings = [0.08, 0.08, 0.08, 0.08, 0, 0, 0, 0, 0, 0.08, 0.08, 0.08]
+  openings = [opening, opening, opening, opening, 0, 0, 0, 0, 0, opening, opening, opening]
   keys = np.tile(model.key_ctrl[0], (len(TIMES), 1))
   keys[:, actuators] = qkeys
   keys[:, gripper] = openings
@@ -218,6 +248,7 @@ def rollout_cpu(model, trajectory, progress=None, record_contact_forces=False):
     contact_groups = np.zeros((len(sample_steps), capacity), dtype=np.uint8)
     contact_counts = np.zeros(len(sample_steps), dtype=np.int32)
     contact_totals = np.zeros(len(sample_steps), dtype=np.int32)
+  physics_started = time.perf_counter()
   for step, ctrl in enumerate(controls):
     data.ctrl[:] = ctrl
     mujoco.mj_step(model, data)
@@ -261,7 +292,15 @@ def rollout_cpu(model, trajectory, progress=None, record_contact_forces=False):
       print(f"t={data.time:.1f}s object={data.qpos[free : free + 3].round(4)} contacts={contacts[step]}", flush=True)
       if progress is not None:
         progress(float(data.time))
-  trace = {"qpos": positions, "qvel": velocities, "force": forces, "contacts": contacts, "warnings": data.warning.number.copy()}
+  physics_seconds = time.perf_counter() - physics_started
+  trace = {
+    "qpos": positions,
+    "qvel": velocities,
+    "force": forces,
+    "contacts": contacts,
+    "warnings": data.warning.number.copy(),
+    "physics_seconds": physics_seconds,
+  }
   if record_contact_forces:
     trace.update(
       contact_steps=sample_steps,
@@ -282,13 +321,7 @@ def validate(model, trajectory, trace, config=None):
   carried = (times >= 10.5) & (times <= 14)
   final = times >= 23
   contact = trace["contacts"]
-  geom = model.geom("cat_sdf")
-  mesh = model.mesh(int(geom.dataid[0]))
-  vertices = model.mesh_vert[mesh.vertadr[0] : mesh.vertadr[0] + mesh.vertnum[0]]
-  rotation = np.empty(9)
-  mujoco.mju_quat2Mat(rotation, geom.quat)
-  vertices = vertices @ rotation.reshape(3, 3).T + geom.pos
-  bounds = np.array([vertices.min(axis=0), vertices.max(axis=0)])
+  bounds = object_bounds(model)
   quat = trace["qpos"][:, free + 3 : free + 7]
   w, x, y, z = quat.T
   rotation_z = np.column_stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)])

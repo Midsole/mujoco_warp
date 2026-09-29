@@ -1,5 +1,7 @@
 """GPU rollout and contact traces for the SDF grasp example."""
 
+import time
+
 import mujoco
 import numpy as np
 import warp as wp
@@ -261,6 +263,10 @@ def rollout_warp(
         )
         wp.launch(_contact_counts, dim=nworld, inputs=[sample_index, contact_totals, capacity, contact_counts])
         wp.launch(_advance, dim=1, inputs=[sample_index])
+    # Exclude baking, upload and capture; synchronize both boundaries so the
+    # elapsed time includes all submitted GPU work, not only CPU launches.
+    wp.synchronize()
+    physics_started = time.perf_counter()
     for step in range(count):
       wp.capture_launch(capture.graph)
       if record_contact_forces and step % sample_stride == 0:
@@ -271,12 +277,15 @@ def rollout_warp(
         print(f"t={(step + 1) * model.opt.timestep:.1f}s object={q[free : free + 3].round(4)}", flush=True)
         if progress is not None:
           progress((step + 1) * model.opt.timestep)
+    wp.synchronize()
+    physics_seconds = time.perf_counter() - physics_started
     trace = {
       "qpos": positions.numpy(),
       "qvel": velocities.numpy(),
       "force": forces.numpy(),
       "contacts": contacts.numpy(),
       "warnings": warnings.numpy(),
+      "physics_seconds": physics_seconds,
     }
     if nworld == 1:
       for key in ("qpos", "qvel", "force", "contacts"):

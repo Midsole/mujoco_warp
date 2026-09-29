@@ -7,6 +7,7 @@
   <style>
     :root { color-scheme: dark; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #0b1320; color: #e8eef7; }
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body { margin: 0; }
     header { padding: 22px clamp(18px, 3vw, 48px); border-bottom: 1px solid #283747; background: #101e2e; }
     header h1 { margin: 0 0 5px; font-size: 26px; letter-spacing: .01em; }
@@ -47,6 +48,7 @@
     .contact-time-status { display: block; margin-top: 4px; }
     .contact-time-status.clamped { color: #efca83; }
     .notice { background: #1b3247; border-left: 3px solid #36b9d7; padding: 10px 13px; border-radius: 5px; }
+    .object-preview { width: 100%; max-height: 250px; object-fit: contain; border-radius: 9px; margin-top: 10px; }
     .error { color: #ffb7b7; }
     .success { color: #7ee1af; }
     .badge { display: inline-block; border-radius: 99px; border: 1px solid #51738e; padding: 4px 9px; font-size: 12px; }
@@ -60,15 +62,16 @@
     .step-detail { color: #a9c9e2; text-align: right; font-variant-numeric: tabular-nums; }
     .results { min-width: 0; }
     .replays { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
-    .replay-box { min-width: 0; }
+    /* Scale both image dimensions by sqrt(2/3), keeping about two thirds of its area. */
+    .replay-box { min-width: 0; width: 81.65%; }
     .replay-box p { margin: 4px 0 8px; }
     .replay-view { width: 100%; aspect-ratio: 4/3; background: #081019; border-radius: 10px;
       display: block; object-fit: contain; touch-action: none; cursor: grab; }
     .replay-view:active { cursor: grabbing; }
-    .replay-box:fullscreen { background: #081019; padding: 14px; overflow: auto; }
+    .replay-box:fullscreen { width: 100%; background: #081019; padding: 14px; overflow: auto; }
     .replay-box:fullscreen .replay-view { width: 100%; height: calc(100vh - 170px); aspect-ratio: auto; }
     .timeline { width: 100%; }
-    .replay-controls { display: flex; align-items: center; gap: 9px; }
+    .replay-controls { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
     .replay-controls select { width: auto; }
     .replay-controls time { min-width: 74px; font-variant-numeric: tabular-nums; }
     .force-controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
@@ -78,12 +81,16 @@
     .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 9px; }
     .metric { border: 1px solid #324f69; border-radius: 9px; padding: 11px; background: #102032; }
     .metric strong { display: block; font-size: 21px; margin-top: 3px; }
-    .history { max-height: 390px; overflow: auto; }
+    .history { max-height: 640px; overflow: auto; }
     .run { padding: 11px 0; border-top: 1px solid #2a4259; }
     .run:first-child { border-top: 0; }
     .run .row { justify-content: space-between; }
     .run small { display: block; margin: 3px 0 8px; }
     .run button { font-size: 12px; padding: 5px 8px; }
+    .history-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; margin: 10px 0; }
+    .history-stat { border: 1px solid #324f69; border-radius: 8px; padding: 9px 10px; background: #102032; }
+    .history-stat span { font-size: 12px; color: #9bb1c7; }
+    .history-stat strong { display: block; font-size: 19px; margin-top: 5px; font-variant-numeric: tabular-nums; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th, td { padding: 9px 7px; border-bottom: 1px solid #2c455b; text-align: left; }
     th { color: #a9c9e2; }
@@ -105,6 +112,17 @@
       <label for="engine">物理后端</label>
       <select id="engine"><option value="warp">Warp GPU</option><option value="c">MuJoCo CPU</option></select>
       <div id="field-groups"></div>
+      <div id="object-upload" hidden>
+        <label for="uploaded-object">已有上传物体</label><select id="uploaded-object"><option value="">请选择上传物体</option></select>
+        <label for="stl-file">上传 STL 文件</label><input id="stl-file" type="file" accept=".stl">
+        <label for="stl-unit">文件坐标单位</label><select id="stl-unit"><option value="mm">毫米 (mm)</option><option value="m">米 (m)</option></select>
+        <label for="stl-size">缩放后的最长边 (mm，0 保留原尺寸)</label><input id="stl-size" type="number" min="0" max="150" step="any" value="60">
+        <p class="muted">默认等比例缩放至最长边 60 mm，保留所有三角形。使用模型的 Z 向上方向，居中放到桌面；双指沿 X 方向夹取，抓取高度按模型尺寸估算。</p>
+        <button id="upload-stl">上传并选择</button>
+        <p id="upload-status" role="status" aria-live="polite" class="muted"></p>
+        <img id="object-preview" class="object-preview" alt="上传物体的桌面预览" hidden>
+        <small>支持二进制 / ASCII STL、封闭且面方向一致的网格，最多 64 MiB / 100 万三角形。复杂形状能否抓稳以实际仿真与验收为准。</small>
+      </div>
       <p class="muted" id="batch-notice" role="status" aria-live="polite"></p>
       <p class="notice" id="contact-time-notice" role="status" aria-live="polite"></p>
       <p class="notice" id="timing-notice" role="status" aria-live="polite"></p>
@@ -129,9 +147,11 @@
         <h3>两轮对照</h3><div class="scroll" id="comparison" class="muted">在历史记录里选择一轮作为对照。</div>
       </section>
       <section>
-        <h2>运行历史</h2><div id="history" class="history muted">正在读取记录…</div>
+        <h2>运行历史</h2>
+        <p class="muted">环境步按 10 Hz 的完整 0.1 秒区间折算；物理吞吐累计全部场景，实时倍数按单场景仿真时长计算。环境步不代表控制目标更新频率。</p>
+        <div id="history" class="history muted">正在读取记录…</div>
       </section>
-      <section><details><summary>本版尚未开放的参数</summary><p class="muted">物体网格与初始位姿、取放路点、各阶段相对时序、夹爪开合路径、IK 与末端姿态；工作台和基座几何、碰撞表示与机器人碰撞代理、双指独立控制；solimp 与接触优先级、关节摩擦损失与 armature；求解器算法和摩擦锥类型。</p></details></section>
+      <section><details><summary>本版尚未开放的参数</summary><p class="muted">物体初始旋转与偏移、自定义取放路点、各阶段相对时序、夹爪开合路径、IK 与末端姿态；工作台和基座几何、碰撞表示与机器人碰撞代理、双指独立控制；solimp 与接触优先级、关节摩擦损失与 armature；求解器算法和摩擦锥类型。</p></details></section>
     </div>
   </main>
   <script>
@@ -143,6 +163,7 @@
     };
     let defaults = {}, selectedId = null, compareId = null, selectedRun = null, compareRun = null, replayKey = '';
     let selectedWorld = 1;
+    let uploadedObjects = [], objectUploadBusy = false;
     const $ = (id) => document.getElementById(id);
     const escapeHtml = (value) => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     async function api(url, options = {}) {
@@ -191,6 +212,10 @@
             });
           }
           box.append(container);
+          if (field.key === 'object_shape') {
+            container.querySelector('select').addEventListener('change', updateObjectGuide);
+            box.append($('object-upload'));
+          }
           if (field.key === 'finger_collision') {
             const guide = document.createElement('small'); guide.className = 'muted';
             guide.textContent = 'SDF 保留完整手指凹槽；旧猫模型轨迹可能在搬运中滑落。可选择原盒体进行对照。';
@@ -240,7 +265,46 @@
       updateBatchGuide();
       updateSdfGuide();
       updateTimingGuide();
+      updateObjectGuide();
     }
+    function updateObjectGuide() {
+      const uploaded = document.querySelector('select[data-key="object_shape"]')?.value === 'uploaded';
+      $('object-upload').hidden = !uploaded;
+      const asset = uploadedObjects.find(item => item.id === $('uploaded-object').value);
+      $('object-preview').hidden = !asset;
+      if (asset) {
+        $('upload-status').className = 'success';
+        $('upload-status').textContent = `${asset.name} · 仿真尺寸 X/Y/Z：${asset.dimensions_mm.map(value => value.toFixed(2)).join(' / ')} mm · ${asset.triangles.toLocaleString()} 个三角形`;
+        $('object-preview').src = `/api/objects/${asset.id}/preview?width=640`;
+      } else if (!objectUploadBusy) {
+        $('upload-status').className = 'muted';
+        $('upload-status').textContent = '选择已有物体，或上传 STL 后开始仿真。';
+        $('object-preview').removeAttribute('src');
+      }
+    }
+    async function loadObjects(selected = $('uploaded-object').value) {
+      uploadedObjects = await api('/api/objects');
+      const select = $('uploaded-object'); select.replaceChildren(new Option('请选择上传物体', ''));
+      for (const asset of uploadedObjects) select.append(new Option(asset.name, asset.id));
+      select.value = selected; updateObjectGuide();
+    }
+    $('uploaded-object').onchange = () => { $('stl-file').value = ''; updateObjectGuide(); };
+    $('stl-file').onchange = () => { $('uploaded-object').value = ''; updateObjectGuide(); };
+    $('upload-stl').onclick = async () => {
+      try {
+        const file = $('stl-file').files[0];
+        if (!file || !file.name.toLowerCase().endsWith('.stl')) throw new Error('请先选择 .stl 文件');
+        if (!file.size || file.size > 64 * 1024 * 1024) throw new Error('文件必须非空且不超过 64 MiB');
+        const size = Number($('stl-size').value);
+        if ($('stl-size').value.trim() === '' || !Number.isFinite(size) || size < 0 || size > 150) throw new Error('最长边须为 0–150 mm');
+        objectUploadBusy = true; $('upload-stl').disabled = true; $('start').disabled = true;
+        $('upload-status').className = 'muted'; $('upload-status').textContent = '正在上传和校验网格…';
+        const query = new URLSearchParams({filename:file.name, unit:$('stl-unit').value, size_mm:String(size)});
+        const asset = await api(`/api/objects?${query}`, {method:'POST', headers:{'Content-Type':'application/octet-stream'}, body:file});
+        await loadObjects(asset.id);
+      } catch (error) { $('upload-status').className = 'error'; $('upload-status').textContent = error.message; }
+      finally { objectUploadBusy = false; $('upload-stl').disabled = false; $('start').disabled = Boolean(window.activeRun); }
+    };
     function runDuration(record) { return record?.timing?.duration ?? record?.config?.duration ?? 24; }
     function updateTimingGuide() {
       const values = ['timestep', 'control_hz', 'duration'].map(key =>
@@ -330,6 +394,11 @@
         });
         config[field.key] = Array.isArray(field.default) ? values : values[0];
       }
+      if (config.object_shape === 'uploaded') {
+        if (objectUploadBusy) throw new Error('请等待 STL 上传完成');
+        config.object_id = $('uploaded-object').value;
+        if (!config.object_id) throw new Error('请先上传 STL 或选择已有上传物体');
+      }
       return config;
     }
     $('reset').onclick = () => {
@@ -345,6 +414,7 @@
       updateBatchGuide();
       updateSdfGuide();
       updateTimingGuide();
+      updateObjectGuide();
       $('form-message').textContent = '已恢复默认值';
     };
     $('start').onclick = async () => {
@@ -531,7 +601,8 @@
       renderSteps(run);
       $('run-error').textContent = run?.error || '';
       $('cancel').hidden = !run || !['queued','running'].includes(run.state);
-      $('start').disabled = Boolean(window.activeRun);
+      $('start').disabled = Boolean(window.activeRun) || objectUploadBusy;
+      if (run?.object_asset) $('progress').textContent += ` · ${run.object_asset.name}（${run.object_asset.dimensions_mm.map(value => value.toFixed(1)).join(' × ')} mm）`;
       const replays = $('replays');
       const nextReplayKey = `${run?.replay_ready ? run.id : ''}:${compareRun?.replay_ready ? compareRun.id : ''}`;
       if (replayKey !== nextReplayKey) {
@@ -604,8 +675,43 @@
       const comparison = $('comparison');
       if (!result || !compareRun?.metrics) { comparison.textContent = '在历史记录里选择一轮作为对照。'; return; }
       const changed = [...fields.keys()].filter(key => JSON.stringify(run.config[key] ?? defaults[key]) !== JSON.stringify(compareRun.config[key] ?? defaults[key]));
+      if ((run.config.object_id || '') !== (compareRun.config.object_id || '')) changed.push('object_id');
       const rows = metricNames.map(([key,label,unit]) => `<tr><td>${escapeHtml(label)}</td><td>${format(sceneResult[key])} ${unit}</td><td>${format(compareRun.metrics[key])} ${unit}</td></tr>`).join('');
-      comparison.innerHTML = `<p>${run.engine.toUpperCase()} / ${run.config.nworld || 1} 个场景（当前第 ${selectedWorld} 个）vs ${compareRun.engine.toUpperCase()} / ${compareRun.config.nworld || 1} 个场景（对照第 1 个）。</p><p>参数差异：${changed.length} 项${changed.length ? `（${changed.map(key => escapeHtml(fields.get(key).label)).join('、')}）` : ''}</p><table><thead><tr><th>指标</th><th>当前</th><th>对照</th></tr></thead><tbody>${rows}</tbody></table>`;
+      comparison.innerHTML = `<p>${run.engine.toUpperCase()} / ${run.config.nworld || 1} 个场景（当前第 ${selectedWorld} 个）vs ${compareRun.engine.toUpperCase()} / ${compareRun.config.nworld || 1} 个场景（对照第 1 个）。</p><p>参数差异：${changed.length} 项${changed.length ? `（${changed.map(key => escapeHtml(fields.get(key)?.label || '上传 STL')).join('、')}）` : ''}</p><table><thead><tr><th>指标</th><th>当前</th><th>对照</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+    function historyStatistics(run) {
+      const stats = run.performance;
+      const box = document.createElement('div');
+      if (!stats) {
+        if (run.state === 'completed') {
+          const missing = document.createElement('small'); missing.textContent = '该记录未保存可用的耗时统计。'; box.append(missing);
+        }
+        return box;
+      }
+      const grid = document.createElement('div'); grid.className = 'history-stats';
+      const count = value => Math.round(value).toLocaleString();
+      const rows = [
+        [stats.timing_scope === 'stepping' ? '步进耗时' : '仿真耗时（含准备）', stats.seconds.toFixed(2), 's'],
+        ['10 Hz 环境步 / 秒（折算）', count(stats.environment_steps_per_second), ''],
+        ['物理步 / 秒（全部场景）', count(stats.physics_steps_per_second), ''],
+        ['单场景实时倍数', stats.realtime_factor.toFixed(2), '×'],
+        ['批次物理步平均耗时', stats.ms_per_batch_physics_step.toFixed(3), 'ms'],
+      ];
+      if (stats.total_seconds !== undefined) rows.push(['整轮总耗时（含验收保存）', stats.total_seconds.toFixed(2), 's']);
+      for (const [label, value, unit] of rows) {
+        const tile = document.createElement('div'); tile.className = 'history-stat';
+        const caption = document.createElement('span'); caption.textContent = label;
+        const number = document.createElement('strong'); number.textContent = `${value}${unit ? ` ${unit}` : ''}`;
+        tile.append(caption, number); grid.append(tile);
+      }
+      box.append(grid);
+      const steps = document.createElement('small');
+      steps.textContent = `每场景 ${format(stats.duration)} s · ${count(stats.physics_steps_per_world)} 物理步 · ` +
+        `${count(stats.environment_steps_per_world)} 个 10 Hz 环境步 · ${count(stats.control_updates_per_world)} 次目标更新（${format(stats.effective_control_hz)} Hz）`;
+      const scope = document.createElement('small');
+      scope.textContent = stats.timing_scope === 'stepping' ? '步进计时含控制与状态采样，不含准备及结果下载。' :
+        '旧记录使用含准备与下载的仿真阶段耗时，未单独保存步进计时。';
+      box.append(steps, scope); return box;
     }
     function renderHistory(runs) {
       const host = $('history'); host.replaceChildren();
@@ -613,12 +719,13 @@
       for (const run of runs) {
         const row = document.createElement('div'); row.className = 'run';
         const top = document.createElement('div'); top.className = 'row';
-        const label = document.createElement('strong'); label.textContent = `${run.engine.toUpperCase()} · ${run.nworld || 1} 个场景 · ${run.id.slice(0, 8)}`;
+        const label = document.createElement('strong'); label.textContent = `${run.engine.toUpperCase()} · ${run.nworld || 1} 个场景 · ${run.id.slice(0, 8)}` + (run.object_name ? ` · ${run.object_name}` : '');
         const status = document.createElement('span'); status.className = 'badge';
         status.textContent = run.state === 'completed' ? (run.passed ? '通过' : '未通过') +
           (run.passed_count !== undefined ? ` ${run.passed_count}/${run.nworld || 1}` : '') : run.state;
         top.append(label, status); row.append(top);
         const date = document.createElement('small'); date.textContent = new Date(run.created_at).toLocaleString(); row.append(date);
+        row.append(historyStatistics(run));
         const buttons = document.createElement('div'); buttons.className = 'toolbar';
         const select = document.createElement('button'); select.textContent = '查看';
         select.onclick = async () => {
@@ -644,7 +751,7 @@
       } catch (error) { $('run-error').textContent = error.message; }
     }
     (async () => {
-      try { buildFields(await api('/api/fields')); await refresh(); setInterval(refresh, 2000); }
+      try { buildFields(await api('/api/fields')); await loadObjects(); await refresh(); setInterval(refresh, 2000); }
       catch (error) { $('form-message').textContent = error.message; }
     })();
   </script>

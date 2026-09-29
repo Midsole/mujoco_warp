@@ -15,6 +15,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import signal
 import threading
 import time
@@ -26,9 +27,12 @@ from urllib.parse import urlparse
 
 from grasp_config import DEFAULTS
 from grasp_config import FIELDS
+from grasp_config import MAX_WORLDS
 from grasp_config import history_config
 from grasp_config import timing_settings
 from grasp_config import validate_config
+from object_upload import MAX_UPLOAD
+from object_upload import ObjectStore
 
 HERE = Path(__file__).resolve().parent
 RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
@@ -90,6 +94,47 @@ def write_json(path, value):
   os.replace(temporary, path)
 
 
+def performance_statistics(config, metrics, stages=()):
+  """Summarize completed work; normalize environment transitions to Physim's 10 Hz clock."""
+  simulation_seconds = metrics.get("simulation_seconds")
+  if not isinstance(simulation_seconds, (int, float)) or not math.isfinite(simulation_seconds) or simulation_seconds <= 0:
+    return None
+  settings = timing_settings(config)
+  nworld = config.get("nworld", metrics.get("nworld", 1))
+  steps = metrics.get("physics_steps_per_world")
+  if steps is None:
+    # Old native runs included the endpoint step. Recover the actual count from
+    # the saved throughput instead of silently assigning the new task length.
+    throughput = metrics.get("world_steps_per_second")
+    steps = round(throughput * simulation_seconds / nworld) if throughput is not None else settings["physics_steps"]
+  duration = steps * config["timestep"]
+  physics_seconds = metrics.get("physics_seconds")
+  has_step_timing = isinstance(physics_seconds, (int, float)) and math.isfinite(physics_seconds) and physics_seconds > 0
+  seconds = physics_seconds if has_step_timing else simulation_seconds
+  environment_steps = math.floor(duration * 10 + 1e-9)
+  result = {
+    "timing_scope": "stepping" if has_step_timing else "simulation_with_setup",
+    "seconds": seconds,
+    "simulation_seconds": simulation_seconds,
+    "duration": duration,
+    "nworld": nworld,
+    "physics_steps_per_world": steps,
+    "physics_steps_total": nworld * steps,
+    "environment_hz": 10,
+    "environment_steps_per_world": environment_steps,
+    "environment_steps_total": nworld * environment_steps,
+    "control_updates_per_world": (steps + settings["control_steps"] - 1) // settings["control_steps"],
+    "effective_control_hz": settings["effective_control_hz"],
+    "physics_steps_per_second": nworld * steps / seconds,
+    "environment_steps_per_second": nworld * environment_steps / seconds,
+    "realtime_factor": duration / seconds,
+    "ms_per_batch_physics_step": seconds * 1000 / steps,
+  }
+  if stages and all(stage["state"] == "completed" and "duration_seconds" in stage for stage in stages):
+    result["total_seconds"] = sum(stage["duration_seconds"] for stage in stages)
+  return result
+
+
 def world_directory(directory, world):
   """Keep world 1 at the legacy path and store other worlds separately."""
   return directory if world == 1 else directory / "worlds" / f"{world:04d}"
@@ -126,19 +171,35 @@ def validate_run(model, trajectory, trace, config):
   return metrics
 
 
-def save_world_traces(directory, trace, nworld):
-  """Save each world's complete state and force replay in its own compressed archives."""
+def _save_world_trace(directory, trace, nworld, world):
+  """Compress one world's replay independently and atomically replace each archive."""
   import numpy as np
 
-  for world in range(nworld):
-    destination = world_directory(directory, world + 1)
-    destination.mkdir(parents=True, exist_ok=True)
-    replay = world_trace(trace, nworld, world)
-    contact_trace = {key: replay.pop(key) for key in CONTACT_KEYS}
-    for filename, values in (("contact_forces", contact_trace), ("trace", replay)):
-      temporary = destination / f"{filename}.part.npz"
+  destination = world_directory(directory, world + 1)
+  destination.mkdir(parents=True, exist_ok=True)
+  replay = world_trace(trace, nworld, world)
+  contact_trace = {key: replay.pop(key) for key in CONTACT_KEYS}
+  for filename, values in (("contact_forces", contact_trace), ("trace", replay)):
+    temporary = destination / f"{filename}.part.npz"
+    try:
       np.savez_compressed(temporary, **values)
       os.replace(temporary, destination / f"{filename}.npz")
+    finally:
+      temporary.unlink(missing_ok=True)
+
+
+def save_world_traces(directory, trace, nworld):
+  """Save complete replay with up to eight concurrent, independent compression jobs."""
+  workers = min(nworld, 8, os.cpu_count() or 1)
+  if workers == 1:
+    for world in range(nworld):
+      _save_world_trace(directory, trace, nworld, world)
+    return
+  # zlib releases the GIL; threads share read-only array views without copying the batch.
+  # Consume every result so errors propagate and completion waits for every archive.
+  with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+    for _ in pool.map(lambda world: _save_world_trace(directory, trace, nworld, world), range(nworld)):
+      pass
 
 
 def run_worker(root, run_id):
@@ -164,7 +225,8 @@ def run_worker(root, run_id):
         saved_config = read_json(run_dir / "config.json")
         config = validate_config(history_config(saved_config))
         stage(1, state="running")
-        model = grasp.build_model(config)
+        mesh_args = {"object_path": run_dir / "object.obj"} if config["object_shape"] == "uploaded" else {}
+        model = grasp.build_model(config, **mesh_args)
         stage(2)
         trajectory = grasp.make_trajectory(model, config)
         timing = timing_settings(config)
@@ -192,14 +254,22 @@ def run_worker(root, run_id):
         else:
           trace = grasp.rollout_cpu(model, trajectory, progress=progress, record_contact_forces=True)
         simulation_seconds = time.perf_counter() - simulation_started
+        physics_seconds = trace.pop("physics_seconds", None)
         stage(4, sim_time=duration)
+        validation_started = time.perf_counter()
         metrics = validate_run(model, trajectory, trace, config)
+        metrics["validation_seconds"] = time.perf_counter() - validation_started
         metrics["simulation_seconds"] = simulation_seconds
         metrics["timing"] = timing
         metrics["sdf_mode"] = config["sdf_mode"]
+        metrics["physics_steps_per_world"] = len(trajectory["ctrl"])
+        if physics_seconds is not None:
+          metrics["physics_seconds"] = physics_seconds
         metrics["world_steps_per_second"] = config["nworld"] * len(trajectory["ctrl"]) / simulation_seconds
-        write_json(run_dir / "metrics.json", metrics)
+        save_started = time.perf_counter()
         save_world_traces(run_dir, trace, config["nworld"])
+        metrics["save_seconds"] = time.perf_counter() - save_started
+        write_json(run_dir / "metrics.json", metrics)
         finish_active_step(status)
         update(
           state="completed",
@@ -245,7 +315,7 @@ def replay_settings(query, duration=24):
     raise ValueError("接触力显示参数无效")
   settings["contact_forces"] = show_forces[0] == "1"
   world = query.get("world", ["1"])
-  if len(world) != 1 or not str(world[0]).isdigit() or not 1 <= int(world[0]) <= 256:
+  if len(world) != 1 or not str(world[0]).isdigit() or not 1 <= int(world[0]) <= MAX_WORLDS:
     raise ValueError("回放场景无效")
   settings["world"] = int(world[0])
   return settings
@@ -267,6 +337,9 @@ class ReplayRenderer:
     except queue.Full as exc:
       raise RuntimeError("回放渲染繁忙，请稍后重试") from exc
     return future.result(timeout=90)
+
+  def preview(self, object_id, settings):
+    return self.render(f"object:{object_id}", settings)
 
   def close(self):
     self.jobs.put(None)
@@ -290,11 +363,18 @@ class ReplayRenderer:
       run_id, settings, future = job
       try:
         if run_id not in cached:
-          directory = self.root / run_id
-          config = history_config(read_json(directory / "config.json"))
+          preview = run_id.startswith("object:")
+          if preview:
+            object_id = run_id.split(":", 1)[1]
+            directory = self.root / "objects" / object_id
+            config = validate_config({"object_shape": "uploaded", "object_id": object_id})
+          else:
+            directory = self.root / run_id
+            config = history_config(read_json(directory / "config.json"))
           # Replay uses recorded qpos/qvel, so contact resolution cannot change motion.
           # Keep the same visible meshes while avoiding a slow deep SDF rebuild.
-          model = grasp.build_model({**config, "sdf_depth": 5})
+          mesh_args = {"object_path": directory / "object.obj"} if config["object_shape"] == "uploaded" else {}
+          model = grasp.build_model({**config, "sdf_depth": 5}, **mesh_args)
           cached[run_id] = {
             "model": model,
             "data": mujoco.MjData(model),
@@ -303,6 +383,12 @@ class ReplayRenderer:
             "renderer": None,
             "width": None,
           }
+          if preview:
+            cached[run_id]["worlds"][1] = {
+              "qpos": model.key_qpos[:1].copy(),
+              "qvel": np.zeros((1, model.nv)),
+              "contact_trace": None,
+            }
           if len(cached) > 2:
             oldest = next(iter(cached))
             if cached[oldest]["renderer"] is not None:
@@ -391,6 +477,7 @@ class RunManager:
   def __init__(self, root):
     self.root = Path(root)
     self.root.mkdir(parents=True, exist_ok=True)
+    self.objects = ObjectStore(self.root)
     self.lock = threading.Lock()
     self.active = None
     self.active_id = None
@@ -407,7 +494,12 @@ class RunManager:
     runs = []
     for directory in self.root.iterdir():
       if directory.is_dir() and RUN_ID.fullmatch(directory.name) and (directory / "status.json").exists():
-        runs.append(read_json(directory / "status.json"))
+        run = read_json(directory / "status.json")
+        if run["state"] == "completed" and (directory / "metrics.json").exists():
+          run["performance"] = performance_statistics(
+            history_config(read_json(directory / "config.json")), read_json(directory / "metrics.json"), run.get("steps", ())
+          )
+        runs.append(run)
     return sorted(runs, key=lambda run: run["created_at"], reverse=True)
 
   def get(self, run_id):
@@ -419,8 +511,12 @@ class RunManager:
     run = read_json(directory / "status.json")
     run["config"] = history_config(read_json(directory / "config.json"))
     run["timing"] = timing_settings(run["config"])
+    if (directory / "object.json").exists():
+      run["object_asset"] = read_json(directory / "object.json")
     if (directory / "metrics.json").exists():
       run["metrics"] = read_json(directory / "metrics.json")
+      if run["state"] == "completed":
+        run["performance"] = performance_statistics(run["config"], run["metrics"], run.get("steps", ()))
     run["replay_ready"] = (directory / "trace.npz").exists()
     run["replay_worlds"] = run.get("replay_worlds", 1 if run["replay_ready"] else 0)
     run["contact_forces_ready"] = (directory / "contact_forces.npz").exists()
@@ -432,8 +528,12 @@ class RunManager:
       if self.active is not None and self.active.is_alive():
         raise RuntimeError("已有仿真正在运行，请等待或取消")
       run_id = uuid.uuid4().hex
+      asset = self.objects.get(config["object_id"]) if config["object_shape"] == "uploaded" else None
       directory = self.root / run_id
       directory.mkdir()
+      if asset is not None:
+        shutil.copyfile(self.objects.root / asset["id"] / "object.obj", directory / "object.obj")
+        write_json(directory / "object.json", asset)
       write_json(directory / "config.json", config)
       created_at = utc_now().isoformat()
       write_json(
@@ -445,6 +545,7 @@ class RunManager:
           "phase": "正在提交配置",
           "engine": config["engine"],
           "nworld": config["nworld"],
+          "object_name": asset["name"] if asset else config["object_shape"],
           "sim_time": 0,
           "steps": new_steps(created_at),
         },
@@ -543,6 +644,24 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
       self._send(200, {"fields": FIELDS, "defaults": DEFAULTS, "engines": ["c", "warp"]})
     elif path == "/api/runs":
       self._send(200, self.server.manager.list_runs())
+    elif path == "/api/objects":
+      self._send(200, self.server.manager.objects.list_objects())
+    elif path.startswith("/api/objects/"):
+      parts = path.split("/")
+      if len(parts) != 5 or parts[4] != "preview":
+        self._send(404, {"error": "路径不存在"})
+        return
+      try:
+        asset = self.server.manager.objects.get(parts[3])
+        query = parse_qs(urlparse(self.path).query)
+        settings = replay_settings(query, duration=0)
+        settings.update(x=-0.16, y=-0.075, z=0.75 + asset["dimensions_mm"][2] / 2000, distance=0.3)
+        frame, _ = self.server.replay.preview(asset["id"], settings)
+        self._send(200, frame, "image/jpeg")
+      except ValueError as exc:
+        self._send(400, {"error": str(exc)})
+      except (RuntimeError, TimeoutError) as exc:
+        self._send(503, {"error": str(exc)})
     elif path.startswith("/api/runs/"):
       parts = path.split("/")
       run_id = parts[3] if len(parts) >= 4 else ""
@@ -620,6 +739,22 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
       self._send(403, {"error": "请求来源不匹配"})
       return
     try:
+      if path == "/api/objects":
+        if not self._authorized():
+          self._send(401, {"error": "请先输入访问令牌"})
+          return
+        length = int(self.headers.get("Content-Length", "0"))
+        if not 0 < length <= MAX_UPLOAD:
+          raise ValueError("STL 文件必须非空且不超过 64 MiB")
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+          raise ValueError("STL 上传不完整，请重试")
+        query = parse_qs(urlparse(self.path).query)
+        asset = self.server.manager.objects.upload(
+          raw, query.get("filename", [""])[0], query.get("unit", ["mm"])[0], float(query.get("size_mm", ["60"])[0])
+        )
+        self._send(201, asset)
+        return
       body = self._body()
       if path == "/api/login":
         token = body.get("token") if isinstance(body, dict) else None
