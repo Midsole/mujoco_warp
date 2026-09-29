@@ -9,6 +9,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from grasp_config import timing_settings
 from grasp_config import validate_config
 
 SCENE = Path(__file__).resolve().with_name("grasp_scene.xml")
@@ -21,7 +22,8 @@ ARM_ACTUATORS = tuple(f"position{i}" for i in range(1, 7))
 
 
 def build_model(config=None):
-  config = validate_config(config or {})
+  # Native scripts retain their 1 ms baseline; the dashboard passes its full configuration.
+  config = validate_config({"timestep": 0.001, **(config or {})})
   if config["object_shape"] == "cat" and not SCENE.with_name("meshes").joinpath("cat_phone_stand.obj").exists():
     raise FileNotFoundError("Run prepare_cat.py --source /path/to/cat_phone_stand.stl first")
   spec = mujoco.MjSpec.from_file(str(SCENE))
@@ -133,7 +135,8 @@ def inverse_kinematics(model, position, seed, rotation=None):
   raise ValueError(f"Unreachable grasp waypoint: {position}")
 
 
-def make_trajectory(model):
+def make_trajectory(model, config=None):
+  """Build the native 24 s baseline, or rescale and hold targets for a configured run."""
   addresses = np.array([model.joint(name).qposadr[0] for name in ARM_JOINTS])
   actuators = np.array([model.actuator(name).id for name in ARM_ACTUATORS])
   gripper = model.actuator("gripper_opening").id
@@ -162,12 +165,35 @@ def make_trajectory(model):
   keys = np.tile(model.key_ctrl[0], (len(TIMES), 1))
   keys[:, actuators] = qkeys
   keys[:, gripper] = openings
-  times = np.arange(round(TIMES[-1] / model.opt.timestep) + 1) * model.opt.timestep
-  segments = np.minimum(np.searchsorted(TIMES, times, side="right") - 1, len(TIMES) - 2)
-  u = ((times - TIMES[segments]) / (TIMES[segments + 1] - TIMES[segments]))[:, None]
+  if config is None:
+    # Existing benchmarks and command-line playback retain the native baseline.
+    times = np.arange(round(TIMES[-1] / model.opt.timestep) + 1) * model.opt.timestep
+    phase_times, control_times = times, times
+    settings = {"duration": float(TIMES[-1]), "control_steps": 1, "effective_control_hz": 1 / model.opt.timestep}
+  else:
+    config = validate_config(config)
+    if not np.isclose(model.opt.timestep, config["timestep"]):
+      raise ValueError("轨迹配置的物理步长必须与模型一致")
+    settings = timing_settings(config)
+    indices = np.arange(settings["physics_steps"])
+    times = indices * model.opt.timestep
+    phase_times = times * TIMES[-1] / settings["duration"]
+    control_times = (indices // settings["control_steps"]) * settings["control_steps"] * model.opt.timestep
+    control_times = control_times * TIMES[-1] / settings["duration"]
+  segments = np.minimum(np.searchsorted(TIMES, control_times, side="right") - 1, len(TIMES) - 2)
+  u = ((control_times - TIMES[segments]) / (TIMES[segments + 1] - TIMES[segments]))[:, None]
   blend = u**3 * (10 + u * (-15 + 6 * u))
   controls = keys[segments] + blend * (keys[segments + 1] - keys[segments])
-  return {"ctrl": controls, "times": times, "qpos": model.key_qpos[:1].copy(), "qvel": np.zeros((1, model.nv))}
+  return {
+    "ctrl": controls,
+    "times": times,
+    "phase_times": phase_times,
+    "duration": settings["duration"],
+    "control_steps": settings["control_steps"],
+    "effective_control_hz": settings["effective_control_hz"],
+    "qpos": model.key_qpos[:1].copy(),
+    "qvel": np.zeros((1, model.nv)),
+  }
 
 
 def rollout_cpu(model, trajectory, progress=None, record_contact_forces=False):
@@ -250,7 +276,7 @@ def rollout_cpu(model, trajectory, progress=None, record_contact_forces=False):
 
 def validate(model, trajectory, trace, config=None):
   config = validate_config(config or {})
-  times = trajectory["times"]
+  times = trajectory.get("phase_times", trajectory["times"])
   free = model.joint("cat_free").qposadr[0]
   cat = trace["qpos"][:, free : free + 3]
   carried = (times >= 10.5) & (times <= 14)

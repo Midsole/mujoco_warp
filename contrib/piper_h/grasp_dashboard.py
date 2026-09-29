@@ -26,6 +26,8 @@ from urllib.parse import urlparse
 
 from grasp_config import DEFAULTS
 from grasp_config import FIELDS
+from grasp_config import history_config
+from grasp_config import timing_settings
 from grasp_config import validate_config
 
 HERE = Path(__file__).resolve().parent
@@ -160,11 +162,14 @@ def run_worker(root, run_id):
         import grasp
 
         saved_config = read_json(run_dir / "config.json")
-        config = validate_config({"finger_collision": "box", "object_shape": "cat", **saved_config})
+        config = validate_config(history_config(saved_config))
         stage(1, state="running")
         model = grasp.build_model(config)
         stage(2)
-        trajectory = grasp.make_trajectory(model)
+        trajectory = grasp.make_trajectory(model, config)
+        timing = timing_settings(config)
+        duration = timing["duration"]
+        update(timing=timing)
 
         def progress(sim_time):
           update(sim_time=round(sim_time, 2))
@@ -182,13 +187,16 @@ def run_worker(root, run_id):
             njmax=config["njmax"],
             progress=progress,
             record_contact_forces=True,
+            sdf_mode=config["sdf_mode"],
           )
         else:
           trace = grasp.rollout_cpu(model, trajectory, progress=progress, record_contact_forces=True)
         simulation_seconds = time.perf_counter() - simulation_started
-        stage(4, sim_time=24)
+        stage(4, sim_time=duration)
         metrics = validate_run(model, trajectory, trace, config)
         metrics["simulation_seconds"] = simulation_seconds
+        metrics["timing"] = timing
+        metrics["sdf_mode"] = config["sdf_mode"]
         metrics["world_steps_per_second"] = config["nworld"] * len(trajectory["ctrl"]) / simulation_seconds
         write_json(run_dir / "metrics.json", metrics)
         save_world_traces(run_dir, trace, config["nworld"])
@@ -196,7 +204,7 @@ def run_worker(root, run_id):
         update(
           state="completed",
           phase="完成",
-          sim_time=24,
+          sim_time=duration,
           passed=metrics["passed"],
           passed_count=metrics["passed_count"],
           replay_worlds=config["nworld"],
@@ -207,10 +215,10 @@ def run_worker(root, run_id):
         update(state="failed", phase="失败", error=str(exc))
 
 
-def replay_settings(query):
+def replay_settings(query, duration=24):
   """Read only bounded camera and image settings from a frame request."""
   ranges = {
-    "time": (0, 24),
+    "time": (0, duration),
     "azimuth": (-360, 360),
     "elevation": (-89, 89),
     "distance": (0.25, 10),
@@ -283,7 +291,7 @@ class ReplayRenderer:
       try:
         if run_id not in cached:
           directory = self.root / run_id
-          config = {"finger_collision": "box", "object_shape": "cat", **read_json(directory / "config.json")}
+          config = history_config(read_json(directory / "config.json"))
           # Replay uses recorded qpos/qvel, so contact resolution cannot change motion.
           # Keep the same visible meshes while avoiding a slow deep SDF rebuild.
           model = grasp.build_model({**config, "sdf_depth": 5})
@@ -409,7 +417,8 @@ class RunManager:
     if not (directory / "status.json").exists():
       return None
     run = read_json(directory / "status.json")
-    run["config"] = {"finger_collision": "box", "object_shape": "cat", **read_json(directory / "config.json")}
+    run["config"] = history_config(read_json(directory / "config.json"))
+    run["timing"] = timing_settings(run["config"])
     if (directory / "metrics.json").exists():
       run["metrics"] = read_json(directory / "metrics.json")
     run["replay_ready"] = (directory / "trace.npz").exists()
@@ -547,7 +556,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
           self._send(404, {"error": "仿真状态尚未保存"})
           return
         try:
-          settings = replay_settings(parse_qs(urlparse(self.path).query))
+          settings = replay_settings(parse_qs(urlparse(self.path).query), run["timing"]["duration"])
           if settings["world"] > run["replay_worlds"]:
             raise ValueError("这个场景没有保存运动轨迹，请重新运行仿真")
           frame, info = self.server.replay.render(run_id, settings)

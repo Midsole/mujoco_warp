@@ -4,12 +4,20 @@ import math
 
 FIELDS = [
   {
+    "key": "sdf_mode",
+    "label": "SDF 查询方式",
+    "group": "机械臂与夹爪",
+    "default": "dense",
+    "choices": ["dense", "octree"],
+    "choice_labels": {"dense": "稠密 SDF（默认，Warp GPU）", "octree": "八叉树 SDF（原生对照）"},
+  },
+  {
     "key": "object_shape",
     "label": "抓取物体",
     "group": "物体与接触",
     "default": "cube",
     "choices": ["cube", "cat"],
-    "choice_labels": {"cube": "方块（网格八叉树 SDF）", "cat": "猫手机支架（网格八叉树 SDF）"},
+    "choice_labels": {"cube": "方块（网格 SDF）", "cat": "猫手机支架（网格 SDF）"},
   },
   {
     "key": "finger_collision",
@@ -89,7 +97,9 @@ FIELDS = [
     "integer": True,
   },
   {"key": "sdf_iterations", "label": "SDF 查询迭代", "group": "高级仿真", "default": 10, "min": 1, "max": 40, "integer": True},
-  {"key": "timestep", "label": "物理步长 (s)", "group": "高级仿真", "default": 0.001, "min": 0.0005, "max": 0.005},
+  {"key": "timestep", "label": "物理步长 (s)", "group": "步进与任务", "default": 0.0005, "min": 0.0005, "max": 0.005},
+  {"key": "control_hz", "label": "控制目标更新频率 (Hz)", "group": "步进与任务", "default": 2000, "min": 1, "max": 2000},
+  {"key": "duration", "label": "任务时长 (s)", "group": "步进与任务", "default": 12, "min": 1, "max": 60},
   {
     "key": "solver_iterations",
     "label": "求解迭代次数",
@@ -149,4 +159,36 @@ def validate_config(raw):
     result[key] = checked if isinstance(field["default"], list) else checked[0]
   if engine == "c" and result["nworld"] != 1:
     raise ValueError("批量仿真需要 Warp GPU 后端；MuJoCo CPU 仅支持 1 个场景")
+  if engine == "c":
+    if raw.get("sdf_mode") == "dense":
+      raise ValueError("稠密 SDF 需要 Warp GPU 后端；MuJoCo CPU 使用八叉树 SDF")
+    result["sdf_mode"] = "octree"
   return result
+
+
+def timing_settings(config):
+  """Quantize control updates and task length to complete physical steps."""
+  timestep = config["timestep"]
+  control_steps = max(1, math.floor(1 / (config["control_hz"] * timestep) + 0.5))
+  steps = max(1, math.floor(config["duration"] / timestep + 0.5))
+  return {
+    "physics_hz": 1 / timestep,
+    "control_steps": control_steps,
+    "effective_control_hz": 1 / (control_steps * timestep),
+    "physics_steps": steps,
+    "duration": steps * timestep,
+  }
+
+
+def history_config(raw):
+  """Preserve the timing and SDF meaning of records predating these fields."""
+  timestep = raw.get("timestep", 0.001)
+  return {
+    "finger_collision": "box",
+    "object_shape": "cat",
+    "timestep": timestep,
+    "control_hz": 1 / timestep,
+    "duration": 24,
+    "sdf_mode": "octree",
+    **raw,
+  }

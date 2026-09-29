@@ -12,6 +12,8 @@ import mujoco
 import numpy as np
 import pytest
 from grasp_config import DEFAULTS
+from grasp_config import history_config
+from grasp_config import timing_settings
 from grasp_config import validate_config
 
 
@@ -47,9 +49,45 @@ def test_config_validation():
   assert validate_config({"condim": 3})["condim"] == 3
   assert validate_config({})["nworld"] == 1
   assert validate_config({})["finger_collision"] == "sdf"
+  assert validate_config({})["sdf_mode"] == "dense"
+  assert validate_config({})["timestep"] == 0.0005
+  assert validate_config({})["control_hz"] == 2000
+  assert validate_config({})["duration"] == 12
+  assert validate_config({"engine": "c"})["sdf_mode"] == "octree"
+  with pytest.raises(ValueError, match="稠密 SDF"):
+    validate_config({"engine": "c", "sdf_mode": "dense"})
   assert validate_config({"finger_collision": "box"})["finger_collision"] == "box"
   for nworld in (16, 32, 64, 128, 256):
     assert validate_config({"engine": "warp", "nworld": nworld})["nworld"] == nworld
+
+
+def test_configured_timing_holds_targets_and_rescales_validation_phase():
+  assert grasp.build_model({"sdf_depth": 5}).opt.timestep == 0.001
+  config = validate_config({"engine": "c", "timestep": 0.002, "control_hz": 100, "duration": 12, "sdf_depth": 5})
+  model = grasp.build_model(config)
+  trajectory = grasp.make_trajectory(model, config)
+  assert len(trajectory["ctrl"]) == 6000
+  assert trajectory["control_steps"] == 5 and trajectory["effective_control_hz"] == 100
+  assert trajectory["duration"] == 12
+  np.testing.assert_allclose(trajectory["phase_times"], trajectory["times"] * 2)
+  groups = trajectory["ctrl"].reshape(-1, 5, model.nu)
+  np.testing.assert_array_equal(groups, np.repeat(groups[:, :1], 5, axis=1))
+  assert np.any(np.diff(groups[:, 0], axis=0) != 0)
+  native = grasp.make_trajectory(model)
+  np.testing.assert_allclose(trajectory["ctrl"][::5], native["ctrl"][::10][:1200], atol=1e-12)
+  settings = timing_settings({"timestep": 0.002, "control_hz": 2000, "duration": 6.0012})
+  assert settings["effective_control_hz"] == 500
+  assert settings["duration"] == pytest.approx(6.002)
+
+
+def test_history_keeps_native_timing_and_octree_defaults():
+  old = history_config({"timestep": 0.002})
+  assert old["control_hz"] == 500 and old["duration"] == 24 and old["sdf_mode"] == "octree"
+  current = history_config({"duration": 36, "control_hz": 100, "sdf_mode": "dense"})
+  assert current["duration"] == 36 and current["control_hz"] == 100 and current["sdf_mode"] == "dense"
+  assert grasp_dashboard.replay_settings({"time": ["36"]}, duration=36)["time"] == 36
+  with pytest.raises(ValueError):
+    grasp_dashboard.replay_settings({"time": ["13"]}, duration=12)
 
 
 def test_model_overrides():
@@ -275,7 +313,7 @@ def test_replay_renders_saved_state(tmp_path, monkeypatch):
   second, _ = replay.render(run_id, settings)
   assert Image.open(io.BytesIO(first)).size == (640, 480)
   assert first != second
-  assert model_configs == [{"sdf_depth": 5, "nworld": 16, "finger_collision": "box", "object_shape": "cat"}]
+  assert model_configs == [{**history_config({"sdf_depth": 10, "nworld": 16}), "sdf_depth": 5}]
   other_world = grasp_dashboard.world_directory(directory, 16)
   other_world.mkdir(parents=True)
   np.savez_compressed(other_world / "trace.npz", qpos=np.array([[-0.5], [-1.0]]), qvel=np.zeros((2, 1)))
@@ -316,17 +354,18 @@ def test_contact_force_settings_validation():
 
 
 @pytest.mark.parametrize("engine", ["c", "warp"])
-def test_contact_force_trace_from_real_steps(engine):
+@pytest.mark.parametrize("timestep", [0.0005, 0.001])
+def test_contact_force_trace_from_real_steps(engine, timestep):
   if engine == "warp":
     import warp as wp
 
     if not wp.is_cuda_available():
       pytest.skip("CUDA unavailable")
-  model = grasp.build_model({"sdf_depth": 5})
+  model = grasp.build_model({"sdf_depth": 5, "timestep": timestep})
   trajectory = {
     "qpos": model.key_qpos[:1].copy(),
     "qvel": np.zeros((1, model.nv)),
-    "ctrl": np.tile(model.key_ctrl[0], (30, 1)),
+    "ctrl": np.tile(model.key_ctrl[0], (round(0.03 / timestep), 1)),
   }
   if engine == "c":
     trace = grasp.rollout_cpu(model, trajectory, record_contact_forces=True)
@@ -334,7 +373,7 @@ def test_contact_force_trace_from_real_steps(engine):
     from grasp_warp import rollout_warp
 
     trace = rollout_warp(model, trajectory, record_contact_forces=True)
-  np.testing.assert_array_equal(trace["contact_steps"], [0, 10, 20])
+  np.testing.assert_array_equal(trace["contact_steps"], np.array([0, 0.01 / timestep, 0.02 / timestep], dtype=int))
   assert trace["contact_counts"][-1] > 0
   assert trace["contact_counts"][-1] == trace["contact_totals"][-1]
   assert np.all(trace["contact_groups"][-1, : trace["contact_counts"][-1]] == 1)
@@ -378,13 +417,15 @@ def test_worker_saves_state_without_encoding_video(tmp_path, monkeypatch, engine
   run_id = "b" * 32
   directory = tmp_path / run_id
   directory.mkdir()
-  grasp_dashboard.write_json(directory / "config.json", {"engine": engine, "nworld": nworld})
+  grasp_dashboard.write_json(
+    directory / "config.json", {"engine": engine, "nworld": nworld, "duration": 36, "control_hz": 100, "sdf_mode": "octree"}
+  )
   started_at = grasp_dashboard.utc_now().isoformat()
   grasp_dashboard.write_json(
     directory / "status.json", {"id": run_id, "state": "queued", "steps": grasp_dashboard.new_steps(started_at)}
   )
   monkeypatch.setattr(grasp, "build_model", lambda config: object())
-  monkeypatch.setattr(grasp, "make_trajectory", lambda model: {"ctrl": np.zeros((2, 1))})
+  monkeypatch.setattr(grasp, "make_trajectory", lambda model, config: {"ctrl": np.zeros((2, 1))})
 
   def rollout(model, trajectory, progress, record_contact_forces, **settings):
     assert record_contact_forces
@@ -415,6 +456,8 @@ def test_worker_saves_state_without_encoding_video(tmp_path, monkeypatch, engine
   grasp_dashboard.run_worker(tmp_path, run_id)
   status = grasp_dashboard.read_json(directory / "status.json")
   assert status["state"] == "completed"
+  assert status["sim_time"] == 36
+  assert status["timing"]["effective_control_hz"] == 100
   assert status["passed_count"] == nworld
   assert status["replay_worlds"] == nworld
   metrics = grasp_dashboard.read_json(directory / "metrics.json")

@@ -26,7 +26,8 @@ print(metadata, validate(model, trajectory, trace))
 
 执行 graph 时必须保持对应缓存数组存活。若要交替使用旧、新两个 graph，需分别保留它们的缓存引用，不能只覆盖 `warp_model.dense_sdf` 后丢弃旧缓存。
 
-默认运行仍使用八叉树。缓存附加在显式传入的 Warp model 上，所有仿真环境共享，不随环境数量复制。目前不支持 C++ 插件 SDF 或多套不同的批量 mesh 数据。
+网页默认运行使用 257³、cell 模式稠密 SDF，也可选择八叉树对照；原生命令行仍使用八叉树基线。
+缓存附加在 Warp model 上，所有仿真环境共享，不随环境数量复制。目前不支持 C++ 插件 SDF 或多套不同的批量 mesh 数据。
 
 ## 复现
 

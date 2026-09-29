@@ -107,7 +107,8 @@
       <div id="field-groups"></div>
       <p class="muted" id="batch-notice" role="status" aria-live="polite"></p>
       <p class="notice" id="contact-time-notice" role="status" aria-live="polite"></p>
-      <p class="muted">动作轨迹保持当前 24 秒基线。物体与桌面接触采用桌面系数，物体与夹爪接触采用物体的系数。验收标准只影响通过判定，不改变仿真运动。</p>
+      <p class="notice" id="timing-notice" role="status" aria-live="polite"></p>
+      <p class="muted">动作顺序与路径沿用基线，按任务时长缩放；较短任务要求机械臂运动更快。物体与桌面接触采用桌面系数，物体与夹爪接触采用物体的系数。验收标准只影响通过判定，不改变仿真运动。</p>
       <div class="toolbar"><button class="primary" id="start">开始仿真</button><button id="reset">恢复默认值</button></div>
       <p id="form-message" role="status"></p>
     </section>
@@ -130,7 +131,7 @@
       <section>
         <h2>运行历史</h2><div id="history" class="history muted">正在读取记录…</div>
       </section>
-      <section><details><summary>本版尚未开放的参数</summary><p class="muted">物体网格与初始位姿、取放路点、动作时序、夹爪开合轨迹、IK 与末端姿态；工作台和基座几何、碰撞表示与机器人碰撞代理、双指独立控制；solimp 与接触优先级、关节摩擦损失与 armature；求解器算法和摩擦锥类型。</p></details></section>
+      <section><details><summary>本版尚未开放的参数</summary><p class="muted">物体网格与初始位姿、取放路点、各阶段相对时序、夹爪开合路径、IK 与末端姿态；工作台和基座几何、碰撞表示与机器人碰撞代理、双指独立控制；solimp 与接触优先级、关节摩擦损失与 armature；求解器算法和摩擦锥类型。</p></details></section>
     </div>
   </main>
   <script>
@@ -195,6 +196,11 @@
             guide.textContent = 'SDF 保留完整手指凹槽；旧猫模型轨迹可能在搬运中滑落。可选择原盒体进行对照。';
             box.append(guide);
           }
+          if (field.key === 'sdf_mode') {
+            const guide = document.createElement('small'); guide.id = 'sdf-mode-notice'; guide.className = 'muted';
+            box.append(guide);
+            container.querySelector('select').addEventListener('change', updateSdfGuide);
+          }
           if (field.key === 'condim') {
             const guide = document.createElement('div'); guide.className = 'condim-guide';
             guide.innerHTML = `<strong>condim 与摩擦项</strong>
@@ -223,12 +229,44 @@
           if (['cat_contact_time', 'table_contact_time', 'timestep'].includes(field.key)) {
             container.querySelector('input').addEventListener('input', updateContactTimeGuide);
           }
+          if (['timestep', 'control_hz', 'duration'].includes(field.key)) {
+            container.querySelector('input').addEventListener('input', updateTimingGuide);
+          }
         }
         details.append(box); $('field-groups').append(details);
       }
       updateCondimGuide();
       updateContactTimeGuide();
       updateBatchGuide();
+      updateSdfGuide();
+      updateTimingGuide();
+    }
+    function runDuration(record) { return record?.timing?.duration ?? record?.config?.duration ?? 24; }
+    function updateTimingGuide() {
+      const values = ['timestep', 'control_hz', 'duration'].map(key =>
+        Number(document.querySelector(`input[data-key="${key}"]`)?.value));
+      const [dt, hz, duration] = values;
+      if (!values.every(value => Number.isFinite(value) && value > 0)) {
+        $('timing-notice').textContent = '填写有效物理步长、更新频率和任务时长后查看生效设置。'; return;
+      }
+      const stride = Math.max(1, Math.round(1 / (hz * dt)));
+      const steps = Math.max(1, Math.round(duration / dt));
+      $('timing-notice').textContent = `物理 ${(1 / dt).toFixed(1)} Hz（${(dt * 1000).toFixed(3)} ms/步）· ` +
+        `控制目标每 ${stride} 个物理步更新，生效 ${(1 / (stride * dt)).toFixed(1)} Hz · ` +
+        `任务 ${(steps * dt).toFixed(3)} s，共 ${steps.toLocaleString()} 步。` +
+        '更新间隔内保持目标；频率和时长按完整物理步取整，控制频率不超过物理频率。';
+    }
+    function updateSdfGuide() {
+      const select = document.querySelector('select[data-key="sdf_mode"]');
+      if (!select) return;
+      const cpu = $('engine').value === 'c';
+      if (cpu && !select.disabled) select.dataset.gpuMode = select.value;
+      if (!cpu && select.disabled) select.value = select.dataset.gpuMode || 'dense';
+      if (cpu) select.value = 'octree';
+      select.disabled = cpu;
+      $('sdf-mode-notice').textContent = cpu ? 'MuJoCo CPU 使用原生八叉树 SDF；稠密 SDF 可在 Warp GPU 下选择。' :
+        (select.value === 'dense' ? '物体及 SDF 手指使用共享稠密距离与梯度缓存；默认方块与双指约增加 3.01 GiB 显存。' :
+          '使用原生八叉树距离与梯度查询，作为稠密 SDF 的对照。');
     }
     function updateBatchGuide() {
       const select = document.querySelector('select[data-key="nworld"]');
@@ -239,7 +277,7 @@
       $('batch-notice').textContent = cpu ? 'MuJoCo CPU 运行 1 个场景；选择 Warp GPU 可启用批量仿真。' :
         `Warp GPU 将并行运行 ${select.value} 个独立场景，使用相同参数、初始状态和动作轨迹；保存每个场景的轨迹，在逐场景验收结果中点击即可回看。`;
     }
-    $('engine').onchange = updateBatchGuide;
+    $('engine').onchange = () => { updateBatchGuide(); updateSdfGuide(); };
     function updateContactTimeGuide() {
       const timestepInput = document.querySelector('input[data-key="timestep"]');
       const timestep = Number(timestepInput.value);
@@ -298,12 +336,15 @@
       $('engine').value = 'warp';
       for (const field of fields.values()) {
         document.querySelectorAll(`[data-key="${field.key}"]`).forEach((input, i) => {
+          delete input.dataset.gpuMode;
           input.value = Array.isArray(field.default) ? field.default[i] : field.default;
         });
       }
       updateCondimGuide();
       updateContactTimeGuide();
       updateBatchGuide();
+      updateSdfGuide();
+      updateTimingGuide();
       $('form-message').textContent = '已恢复默认值';
     };
     $('start').onclick = async () => {
@@ -340,7 +381,7 @@
         if (step.state === 'running') {
           const elapsed = Math.max(0, (Date.now() - Date.parse(step.started_at)) / 1000);
           detail.textContent = `正在${step.name} · 已用 ${elapsed.toFixed(1)} 秒` +
-            (index === 3 ? ` · 仿真 ${format(run.sim_time || 0)} / 24 秒` : '');
+            (index === 3 ? ` · 仿真 ${format(run.sim_time || 0)} / ${format(runDuration(run))} 秒` : '');
         } else if (step.state === 'completed') {
           detail.textContent = `已完成 · 耗时 ${step.duration_seconds.toFixed(2)} 秒`;
         } else if (step.state === 'failed' || step.state === 'canceled') {
@@ -350,6 +391,7 @@
       });
     }
     function replayBox(run, title, world = 1) {
+      const duration = runDuration(run);
       const wrap = document.createElement('div'); wrap.className = 'replay-box';
       wrap.dataset.runId = run.id;
       const text = document.createElement('p'); text.textContent = `${title} · ${run.engine.toUpperCase()} · ${run.id.slice(0, 8)}` +
@@ -359,10 +401,10 @@
       image.draggable = false; wrap.append(image);
       const hint = document.createElement('small'); hint.textContent = '拖动旋转 · Shift 拖动平移 · 滚轮缩放'; wrap.append(hint);
       const timeline = document.createElement('input'); timeline.type = 'range'; timeline.className = 'timeline';
-      timeline.min = '0'; timeline.max = '24'; timeline.step = '0.05'; timeline.value = '0'; wrap.append(timeline);
+      timeline.min = '0'; timeline.max = String(duration); timeline.step = '0.05'; timeline.value = '0'; wrap.append(timeline);
       const controls = document.createElement('div'); controls.className = 'replay-controls';
       const play = document.createElement('button'); play.textContent = '播放'; play.disabled = true; controls.append(play);
-      const clock = document.createElement('time'); clock.textContent = '0.00 / 24 s'; controls.append(clock);
+      const clock = document.createElement('time'); clock.textContent = `0.00 / ${duration} s`; controls.append(clock);
       const quality = document.createElement('select'); quality.setAttribute('aria-label', '渲染分辨率');
       for (const width of [640, 960, 1280, 1920]) {
         const option = document.createElement('option'); option.value = width; option.textContent = `${width} × ${width * 3 / 4}`;
@@ -425,20 +467,20 @@
         });
       }
       function setTime(value) {
-        view.time = Math.max(0, Math.min(24, value));
+        view.time = Math.max(0, Math.min(duration, value));
         timeline.value = view.time;
-        clock.textContent = `${view.time.toFixed(2)} / 24 s`;
+        clock.textContent = `${view.time.toFixed(2)} / ${duration} s`;
         draw();
       }
       function tick(now) {
         if (!playing || removed) return;
         if (lastTick) setTime(view.time + Math.min((now - lastTick) / 1000, 0.25));
         lastTick = now;
-        if (view.time >= 24) { playing = false; play.textContent = '播放'; return; }
+        if (view.time >= duration) { playing = false; play.textContent = '播放'; return; }
         requestAnimationFrame(tick);
       }
       play.onclick = () => {
-        if (view.time >= 24) setTime(0);
+        if (view.time >= duration) setTime(0);
         playing = !playing; play.textContent = playing ? '暂停' : '播放'; lastTick = 0;
         if (playing) requestAnimationFrame(tick);
       };
@@ -483,7 +525,9 @@
     function renderResults() {
       const run = selectedRun;
       $('state').textContent = run ? ({queued:'等待启动',running:'运行中',completed:'已完成',failed:'失败',canceled:'已取消'}[run.state] || run.state) : '尚未运行';
-      $('progress').textContent = run ? `${run.phase} · ${run.config.nworld || 1} 个场景 · 每场景仿真 ${format(run.sim_time || 0)} / 24 秒` : '从左侧选择参数并开始运行。';
+      $('progress').textContent = run ? `${run.phase} · ${run.config.nworld || 1} 个场景 · 每场景仿真 ${format(run.sim_time || 0)} / ${format(runDuration(run))} 秒` +
+        ` · 物理步 ${format(run.config.timestep * 1000)} ms（${format(run.timing?.physics_hz ?? 1 / run.config.timestep)} Hz）` +
+        ` · 控制 ${format(run.timing?.effective_control_hz ?? run.config.control_hz)} Hz · ${run.config.sdf_mode === 'dense' ? '稠密 SDF' : '八叉树 SDF'}` : '从左侧选择参数并开始运行。';
       renderSteps(run);
       $('run-error').textContent = run?.error || '';
       $('cancel').hidden = !run || !['queued','running'].includes(run.state);

@@ -163,13 +163,24 @@ def _contact_counts(
 
 
 def rollout_warp(
-  model, trajectory, *, nworld=1, nconmax=256, njmax=1024, progress=None, record_contact_forces=False, warp_model=None
+  model,
+  trajectory,
+  *,
+  nworld=1,
+  nconmax=256,
+  njmax=1024,
+  progress=None,
+  record_contact_forces=False,
+  warp_model=None,
+  sdf_mode="octree",
 ):
   """Run independent worlds; batched states and forces have a leading world axis."""
   if isinstance(nworld, bool) or not isinstance(nworld, int) or nworld < 1:
     raise ValueError("nworld must be a positive integer")
   if not wp.is_cuda_available():
     raise RuntimeError("Warp grasp validation requires CUDA; use --engine=c for CPU")
+  if sdf_mode not in ("dense", "octree"):
+    raise ValueError("sdf_mode must be dense or octree")
   data = mujoco.MjData(model)
   data.qpos[:] = trajectory["qpos"][0]
   data.qvel[:] = trajectory["qvel"][0]
@@ -177,6 +188,10 @@ def rollout_warp(
   count = len(trajectory["ctrl"])
   with wp.ScopedDevice("cuda:0"):
     m = mjw.put_model(model) if warp_model is None else warp_model
+    if sdf_mode == "dense":
+      from dense_sdf import attach_dense_sdf
+
+      attach_dense_sdf(model, m, 257)
     d = mjw.put_data(model, data, nworld=nworld, nconmax=nconmax, njmax=njmax)
     targets = wp.array(trajectory["ctrl"], dtype=float)
     index = wp.zeros(1, dtype=int)
