@@ -38,6 +38,8 @@ uv run pytest -n 8
 完整模型、接触参数、测试和基准用法见 [PiPER 使用说明](contrib/piper_h/README.md)。
 根 pytest 配置同时收集生成副本中的引擎测试、PiPER 测试和准备脚本测试；GPU 验收需要真实 CUDA 主机。
 CI 运行可在无 GPU 环境验证的工具和接口测试，不能代替本地完整验收。
+引擎与 PiPER 测试共享一块 GPU，xdist 将它们放在同一组串行运行，避免多个进程同时分配 CUDA 图；
+工具测试仍可并行。`uv run pytest -n 8` 保留全部测试，不通过跳过 GPU 用例降低显存压力。
 
 ## 开发与来源
 
@@ -45,3 +47,4 @@ CI 运行可在无 GPU 环境验证的工具和接口测试，不能代替本地
 源码清单、补丁来源与维护方式见 [补丁说明](patches/mujoco_warp/README.md) 和
 [开发流程](FORK_WORKFLOW.md)。实验结果、虚拟环境及生成源码不进入 Git。
 上游 Apache-2.0 许可证及模型的独立许可均保留。
+本次改造的验收、原有测试问题与资源调度调整见 [验证报告](docs/SUBMODULE_VALIDATION.md)。

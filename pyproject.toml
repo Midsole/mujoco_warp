@@ -68,5 +68,6 @@ docstring-code-format = true
 docstring-code-line-length = 100
 
 [tool.pytest.ini_options]
+addopts = "--dist=loadgroup"
 testpaths = [".build/mujoco_warp/mujoco_warp", "contrib/piper_h", "tests"]
 norecursedirs = ["external", "benchmarks", "results"]
