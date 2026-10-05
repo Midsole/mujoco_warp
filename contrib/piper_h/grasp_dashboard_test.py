@@ -357,7 +357,7 @@ def test_replay_renders_saved_state(tmp_path, monkeypatch, nworld):
   settings["contact_forces"] = False
   settings["time"] = model.opt.timestep
   second, _ = replay.render(run_id, settings)
-  assert Image.open(io.BytesIO(first)).size == (640, 480)
+  assert Image.open(io.BytesIO(first)).size == (640, 360)
   assert first != second
   assert model_configs == [{**history_config({"sdf_depth": 10, "nworld": nworld}), "sdf_depth": 5}]
   other_world = grasp_dashboard.world_directory(directory, nworld)
@@ -677,3 +677,34 @@ def test_oom_worker_failure_is_recorded(tmp_path):
   assert status["state"] == "failed"
   assert "内存" in status["error"]
   assert status["steps"][0]["state"] == "failed"
+
+
+def test_gripper_replay_restores_prescribed_root(tmp_path, monkeypatch):
+  import mujoco
+
+  model = mujoco.MjModel.from_xml_string(
+    '<mujoco><worldbody><body mocap="true"><geom type="sphere" size="0.1"/></body>'
+    '<body><joint type="slide"/><geom type="sphere" size="0.1"/></body></worldbody></mujoco>'
+  )
+  monkeypatch.setattr(grasp, "build_model", lambda config: model)
+  run_id = "e" * 32
+  directory = tmp_path / run_id
+  directory.mkdir()
+  grasp_dashboard.write_json(directory / "config.json", {"robot_mode": "gripper_only", "reference_run_id": "a" * 32})
+  poses = np.array([[0, 0, 0.8, 1, 0, 0, 0], [0.3, 0.1, 0.9, 1, 0, 0, 0]])
+  np.savez(directory / "trace.npz", qpos=np.zeros((2, 1)), qvel=np.zeros((2, 1)), root_pose=poses)
+  observed = []
+  original = mujoco.mj_forward
+
+  def inspect_pose(model, data):
+    observed.append(data.mocap_pos.copy())
+    original(model, data)
+
+  monkeypatch.setattr(mujoco, "mj_forward", inspect_pose)
+  replay = grasp_dashboard.ReplayRenderer(tmp_path)
+  try:
+    frame, _ = replay.render(run_id, grasp_dashboard.replay_settings({"time": ["1"], "width": ["640"]}))
+    assert frame.startswith(b"\xff\xd8")
+    np.testing.assert_array_equal(observed[-1][0], poses[1, :3])
+  finally:
+    replay.close()

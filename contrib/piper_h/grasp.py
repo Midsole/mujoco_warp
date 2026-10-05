@@ -22,7 +22,7 @@ ARM_JOINTS = tuple(f"joint{i}" for i in range(1, 7))
 ARM_ACTUATORS = tuple(f"position{i}" for i in range(1, 7))
 
 
-def build_model(config=None, *, object_path=None):
+def build_spec(config=None, *, object_path=None):
   # Native scripts retain their 1 ms baseline; the dashboard passes its full configuration.
   config = validate_config({"timestep": 0.001, **(config or {})})
   if config["object_shape"] == "cat" and not SCENE.with_name("meshes").joinpath("cat_phone_stand.obj").exists():
@@ -98,6 +98,15 @@ def build_model(config=None, *, object_path=None):
     actuator.gainprm[0] = kp
     actuator.biasprm[1:3] = [-kp, -kv]
     actuator.forcerange = [-limit, limit]
+  return spec
+
+
+def build_model(config=None, *, object_path=None):
+  if config and config.get("robot_mode") == "gripper_only":
+    from gripper_only import detach
+
+    return detach({**config, "robot_mode": "full_arm", "reference_run_id": ""}, object_path=object_path)
+  spec = build_spec(config, object_path=object_path)
   # MuJoCo's process-wide mesh cache omits octree depth from its key.
   # Recompiling after a different depth must rebuild the SDF octree.
   mujoco.mj_clearCache(mujoco.mj_getCache())
@@ -326,13 +335,16 @@ def validate(model, trajectory, trace, config=None):
   w, x, y, z = quat.T
   rotation_z = np.column_stack([2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)])
   bottom = cat[:, 2] + np.minimum(rotation_z * bounds[0], rotation_z * bounds[1]).sum(axis=1)
-  joint_names = (*ARM_JOINTS, "gripper_joint1", "gripper_joint2")
+  joint_names = (*(() if model.nmocap else ARM_JOINTS), "gripper_joint1", "gripper_joint2")
   addresses = [model.joint(name).qposadr[0] for name in joint_names]
   limits = np.array([model.joint(name).range for name in joint_names])
   joint_positions = trace["qpos"][:, addresses]
   limit_error = np.maximum(limits[:, 0] - joint_positions, joint_positions - limits[:, 1])
   force_error = np.maximum(model.actuator_forcerange[:, 0] - trace["force"], trace["force"] - model.actuator_forcerange[:, 1])
-  base = model.body("base_link")
+  fixed_base = model.nmocap == 1
+  if not fixed_base:
+    base = model.body("base_link")
+    fixed_base = base.jntnum[0] == 0 and np.allclose(base.pos, [-0.5, 0, 0.75])
   results = {
     "minimum_carried_height_m": float(np.min(bottom[carried] - TABLE_HEIGHT)),
     "placement_error_m": float(np.linalg.norm(cat[-1, :2] - PLACE)),
@@ -359,7 +371,7 @@ def validate(model, trajectory, trace, config=None):
     results["final_drift_m"] <= config["maximum_final_drift"],
     results["joint_limit_error"] < 0.001,
     results["force_limit_error"] < 1e-4,
-    base.jntnum[0] == 0 and np.allclose(base.pos, [-0.5, 0, 0.75]),
+    fixed_base,
     bool(np.any(contact[final, 2] > 0)),
   ]
   results["passed"] = bool(all(checks))

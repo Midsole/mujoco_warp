@@ -254,6 +254,13 @@ def main():
   parser.add_argument("--physim-root", type=Path, default=REPO.parent / "physim/grasp-lab")
   parser.add_argument("--worlds", type=int, nargs="+", default=[1, 128, 512])
   parser.add_argument("--repeats", type=int, default=3)
+  parser.add_argument(
+    "--modes",
+    nargs="+",
+    choices=("mujoco_octree", "mujoco_dense", "physim_region"),
+    default=["mujoco_octree", "mujoco_dense", "physim_region"],
+    help="Implementations to compare; omit the octree baseline for a dense-only comparison",
+  )
   parser.add_argument("--duration", type=float, default=12.0)
   parser.add_argument("--timestep", type=float, default=0.0005)
   parser.add_argument("--control-hz", type=float, default=2000.0)
@@ -313,23 +320,27 @@ def main():
       for root in (REPO, args.physim_root)
     }
     (args.output / "nvidia_smi_start.txt").write_text(subprocess.run(["nvidia-smi"], capture_output=True, text=True).stdout)
-    modes = ("mujoco_octree", "mujoco_dense", "physim_region")
+    modes = tuple(dict.fromkeys(args.modes))
     if not args.smoke:
-      for mode in modes[:2]:
+      for mode in (mode for mode in modes if mode != "physim_region"):
         warp_model.dense_sdf = dense if mode == "mujoco_dense" else DenseSDF()
         trace = rollout_warp(model, trajectory, warp_model=warp_model)
         out["validation"][mode] = validate(model, trajectory, trace)
         np.savez_compressed(args.output / f"{mode}_validation.npz", **trace, phase_time=trajectory["phase_times"])
         save()
         print(f"Validation {mode}: {out['validation'][mode]}", flush=True)
-      report, history, q0 = reference_run(*fields, make_cases(1), 1e-5, 0, mass=0.1)
-      out["validation"]["physim_region"] = report
-      np.savez_compressed(args.output / "physim_validation.npz", q0=q0, **history)
-      out["validation"]["physim_region"]["finite_history"] = bool(all(np.isfinite(values).all() for values in history.values()))
-      save()
+      if "physim_region" in modes:
+        report, history, q0 = reference_run(*fields, make_cases(1), 1e-5, 0, mass=0.1)
+        out["validation"]["physim_region"] = report
+        np.savez_compressed(args.output / "physim_validation.npz", q0=q0, **history)
+        out["validation"]["physim_region"]["finite_history"] = bool(
+          all(np.isfinite(values).all() for values in history.values())
+        )
+        save()
     for worlds in args.worlds:
       for repeat in range(args.repeats):
-        for mode in modes[repeat % 3 :] + modes[: repeat % 3]:
+        offset = repeat % len(modes)
+        for mode in modes[offset:] + modes[:offset]:
           print(f"Timing {mode}, worlds={worlds}, repeat={repeat + 1}", flush=True)
           setup_start = time.perf_counter()
           if mode == "physim_region":

@@ -8,6 +8,14 @@ MAX_WORLDS = max(WORLD_COUNTS)
 
 FIELDS = [
   {
+    "key": "robot_mode",
+    "label": "机器人模式",
+    "group": "机器人",
+    "default": "full_arm",
+    "choices": ["full_arm", "gripper_only"],
+    "choice_labels": {"full_arm": "完整机械臂", "gripper_only": "仅夹爪"},
+  },
+  {
     "key": "sdf_mode",
     "label": "SDF 查询方式",
     "group": "机械臂与夹爪",
@@ -121,7 +129,7 @@ FIELDS = [
   {"key": "maximum_final_drift", "label": "最终漂移上限 (m)", "group": "验收标准", "default": 0.005, "min": 0, "max": 0.1},
 ]
 
-DEFAULTS = {**{field["key"]: field["default"] for field in FIELDS}, "object_id": ""}
+DEFAULTS = {**{field["key"]: field["default"] for field in FIELDS}, "object_id": "", "reference_run_id": ""}
 ENGINES = ("c", "warp")
 
 
@@ -138,7 +146,10 @@ def validate_config(raw):
   object_id = raw.get("object_id", "")
   if not isinstance(object_id, str) or (object_id and not re.fullmatch(r"[0-9a-f]{32}", object_id)):
     raise ValueError("上传物体编号无效")
-  result = {"engine": engine, "object_id": object_id}
+  reference_id = raw.get("reference_run_id", "")
+  if not isinstance(reference_id, str) or (reference_id and not re.fullmatch(r"[0-9a-f]{32}", reference_id)):
+    raise ValueError("参考运行编号无效")
+  result = {"engine": engine, "object_id": object_id, "reference_run_id": reference_id}
   for field in FIELDS:
     key = field["key"]
     value = raw.get(key, field["default"])
@@ -166,6 +177,9 @@ def validate_config(raw):
     result[key] = checked if isinstance(field["default"], list) else checked[0]
   if result["object_shape"] == "uploaded" and not object_id:
     raise ValueError("请先上传 STL 或选择已有上传物体")
+  if result["robot_mode"] == "gripper_only":
+    if engine != "warp":
+      raise ValueError("仅夹爪模式需要 Warp GPU 后端")
   if engine == "c" and result["nworld"] != 1:
     raise ValueError("批量仿真需要 Warp GPU 后端；MuJoCo CPU 仅支持 1 个场景")
   if engine == "c":

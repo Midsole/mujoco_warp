@@ -148,6 +148,8 @@ def world_trace(trace, nworld, world):
   result["warnings"] = trace["warnings"][world : world + 1]
   result["contact_steps"] = trace["contact_steps"]
   result.update({key: trace[key][world] for key in CONTACT_KEYS if key != "contact_steps"})
+  if "root_pose" in trace:
+    result["root_pose"] = trace["root_pose"][world]
   return result
 
 
@@ -228,7 +230,30 @@ def run_worker(root, run_id):
         mesh_args = {"object_path": run_dir / "object.obj"} if config["object_shape"] == "uploaded" else {}
         model = grasp.build_model(config, **mesh_args)
         stage(2)
-        trajectory = grasp.make_trajectory(model, config)
+        trajectory_started = time.perf_counter()
+        reference_metrics = {}
+        if config["robot_mode"] == "gripper_only" and config["reference_run_id"]:
+          from gripper_reference import prepare
+
+          update(phase="正在准备参考末端轨迹")
+          trajectory, reference_metrics = prepare(root, config["reference_run_id"], config, model, run_dir)
+        elif config["robot_mode"] == "gripper_only":
+          import numpy as np
+          from gripper_only import fixed_trajectory
+
+          trajectory = fixed_trajectory(model, config)
+          np.save(run_dir / "root_motion.npy", trajectory["root_motion"])
+          write_json(
+            run_dir / "reference.json",
+            {
+              "source": "fixed_cartesian_v1",
+              "config": config,
+              "coordinates": "world; quaternion wxyz; analytic velocities and accelerations; pre-step poses",
+            },
+          )
+        else:
+          trajectory = grasp.make_trajectory(model, config)
+        trajectory_seconds = time.perf_counter() - trajectory_started
         timing = timing_settings(config)
         duration = timing["duration"]
         update(timing=timing)
@@ -255,10 +280,14 @@ def run_worker(root, run_id):
           trace = grasp.rollout_cpu(model, trajectory, progress=progress, record_contact_forces=True)
         simulation_seconds = time.perf_counter() - simulation_started
         physics_seconds = trace.pop("physics_seconds", None)
+        rollout_timings = {key: trace.pop(key) for key in ("rollout_setup_seconds", "download_seconds") if key in trace}
         stage(4, sim_time=duration)
         validation_started = time.perf_counter()
         metrics = validate_run(model, trajectory, trace, config)
         metrics["validation_seconds"] = time.perf_counter() - validation_started
+        metrics["trajectory_prepare_seconds"] = trajectory_seconds
+        metrics.update(reference_metrics)
+        metrics.update(rollout_timings)
         metrics["simulation_seconds"] = simulation_seconds
         metrics["timing"] = timing
         metrics["sdf_mode"] = config["sdf_mode"]
@@ -403,7 +432,7 @@ class ReplayRenderer:
           if not (directory / "trace.npz").exists():
             raise ValueError("这个场景没有保存运动轨迹，请重新运行仿真")
           with np.load(directory / "trace.npz") as saved:
-            states = {key: saved[key] for key in ("qpos", "qvel")}
+            states = {key: saved[key] for key in ("qpos", "qvel", "root_pose") if key in saved.files}
           contact_path = directory / "contact_forces.npz"
           states["contact_trace"] = None
           if contact_path.exists():
@@ -419,12 +448,15 @@ class ReplayRenderer:
           if item["renderer"] is not None:
             item["renderer"].close()
           model.vis.global_.offwidth = width
-          model.vis.global_.offheight = width * 3 // 4
-          item["renderer"] = mujoco.Renderer(model, width=width, height=width * 3 // 4)
+          model.vis.global_.offheight = width * 9 // 16
+          item["renderer"] = mujoco.Renderer(model, width=width, height=width * 9 // 16)
           item["width"] = width
         step = min(round(settings["time"] / model.opt.timestep), len(states["qpos"]) - 1)
         data.qpos[:] = states["qpos"][step]
         data.qvel[:] = states["qvel"][step]
+        if "root_pose" in states:
+          data.mocap_pos[0] = states["root_pose"][step, :3]
+          data.mocap_quat[0] = states["root_pose"][step, 3:7]
         data.time = step * model.opt.timestep
         mujoco.mj_forward(model, data)
         camera = mujoco.MjvCamera()
@@ -528,11 +560,19 @@ class RunManager:
       if self.active is not None and self.active.is_alive():
         raise RuntimeError("已有仿真正在运行，请等待或取消")
       run_id = uuid.uuid4().hex
-      asset = self.objects.get(config["object_id"]) if config["object_shape"] == "uploaded" else None
+      reference = None
+      if config["robot_mode"] == "gripper_only" and config["reference_run_id"]:
+        from gripper_reference import check_reference
+
+        reference = check_reference(self.root, config["reference_run_id"], config)
+      asset = None
+      if config["object_shape"] == "uploaded":
+        asset = read_json(reference / "object.json") if reference else self.objects.get(config["object_id"])
       directory = self.root / run_id
       directory.mkdir()
       if asset is not None:
-        shutil.copyfile(self.objects.root / asset["id"] / "object.obj", directory / "object.obj")
+        mesh_source = reference if reference else self.objects.root / asset["id"]
+        shutil.copyfile(mesh_source / "object.obj", directory / "object.obj")
         write_json(directory / "object.json", asset)
       write_json(directory / "config.json", config)
       created_at = utc_now().isoformat()
@@ -545,6 +585,7 @@ class RunManager:
           "phase": "正在提交配置",
           "engine": config["engine"],
           "nworld": config["nworld"],
+          "robot_mode": config["robot_mode"],
           "object_name": asset["name"] if asset else config["object_shape"],
           "sim_time": 0,
           "steps": new_steps(created_at),

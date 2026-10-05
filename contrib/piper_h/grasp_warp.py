@@ -183,6 +183,7 @@ def rollout_warp(
     raise RuntimeError("Warp grasp validation requires CUDA; use --engine=c for CPU")
   if sdf_mode not in ("dense", "octree"):
     raise ValueError("sdf_mode must be dense or octree")
+  rollout_started = time.perf_counter()
   data = mujoco.MjData(model)
   data.qpos[:] = trajectory["qpos"][0]
   data.qvel[:] = trajectory["qvel"][0]
@@ -197,6 +198,15 @@ def rollout_warp(
     d = mjw.put_data(model, data, nworld=nworld, nconmax=nconmax, njmax=njmax)
     targets = wp.array(trajectory["ctrl"], dtype=float)
     index = wp.zeros(1, dtype=int)
+    prescribed = None
+    if "root_motion" in trajectory:
+      from gripper_only import PrescribedGripper
+      from gripper_only import motion_state
+
+      if trajectory["root_motion"].shape[:2] != (nworld, count):
+        raise ValueError("参考末端轨迹的场景数和步数必须与仿真一致")
+      prescribed = PrescribedGripper(model, trajectory["root_motion"])
+      prescribed.state = motion_state(m, d)
     positions = wp.empty((nworld, count, model.nq))
     velocities = wp.empty((nworld, count, model.nv))
     forces = wp.empty((nworld, count, model.nu))
@@ -205,7 +215,10 @@ def rollout_warp(
     ids = [model.geom("cat_sdf").id, model.geom("tabletop").id, model.body("gripper_link1").id, model.body("gripper_link2").id]
     with wp.ScopedCapture() as capture:
       wp.launch(_control, dim=(nworld, model.nu), inputs=[targets, index, d.ctrl])
-      mjw.step(m, d)
+      if prescribed is None:
+        mjw.step(m, d)
+      else:
+        prescribed.step(m, d, index)
       wp.launch(
         _trace,
         dim=nworld,
@@ -279,6 +292,7 @@ def rollout_warp(
           progress((step + 1) * model.opt.timestep)
     wp.synchronize()
     physics_seconds = time.perf_counter() - physics_started
+    download_started = time.perf_counter()
     trace = {
       "qpos": positions.numpy(),
       "qvel": velocities.numpy(),
@@ -302,4 +316,9 @@ def rollout_warp(
       if nworld == 1:
         for key in ("contact_positions", "contact_forces", "contact_groups", "contact_counts", "contact_totals"):
           trace[key] = trace[key][0]
+    if prescribed is not None:
+      poses = trajectory["root_motion"][:, :, :7]
+      trace["root_pose"] = poses[0] if nworld == 1 else poses
+    trace["rollout_setup_seconds"] = physics_started - rollout_started
+    trace["download_seconds"] = time.perf_counter() - download_started
     return trace
