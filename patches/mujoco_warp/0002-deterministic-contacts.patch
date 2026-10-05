@@ -1,0 +1,1392 @@
+diff --git a/mujoco_warp/_src/collision_core.py b/mujoco_warp/_src/collision_core.py
+index 8f8cc4a..3d3f7e2 100644
+--- a/mujoco_warp/_src/collision_core.py
++++ b/mujoco_warp/_src/collision_core.py
+@@ -248,7 +248,84 @@ def write_contact(
+   contact_adhesion_out: wp.array[float],
+   nacon_out: wp.array[int],
+ ) -> int:
+-  """Atomically write a detected contact into the contact output arrays.
++  """Atomically append a contact through the shared fixed-slot writer."""
++  return write_contact_at_slot(
++    naconmax_in,
++    id_,
++    dist_in,
++    pos_in,
++    frame_in,
++    margin_in,
++    gap_in,
++    condim_in,
++    friction_in,
++    solref_in,
++    solreffriction_in,
++    solimp_in,
++    adhesion_in,
++    geoms_in,
++    pairid_in,
++    worldid_in,
++    -1,
++    contact_dist_out,
++    contact_pos_out,
++    contact_frame_out,
++    contact_includemargin_out,
++    contact_friction_out,
++    contact_solref_out,
++    contact_solreffriction_out,
++    contact_solimp_out,
++    contact_dim_out,
++    contact_geom_out,
++    contact_efc_address_out,
++    contact_worldid_out,
++    contact_type_out,
++    contact_geomcollisionid_out,
++    contact_adhesion_out,
++    nacon_out,
++  )
++
++
++@wp.func
++def write_contact_at_slot(
++  # Data in:
++  naconmax_in: int,
++  # In:
++  id_: int,
++  dist_in: float,
++  pos_in: wp.vec3,
++  frame_in: wp.mat33,
++  margin_in: float,
++  gap_in: float,
++  condim_in: int,
++  friction_in: vec5,
++  solref_in: wp.vec2,
++  solreffriction_in: wp.vec2,
++  solimp_in: vec5,
++  adhesion_in: float,
++  geoms_in: wp.vec2i,
++  pairid_in: wp.vec2i,
++  worldid_in: int,
++  fixed_slot: int,
++  # Data out:
++  contact_dist_out: wp.array[float],
++  contact_pos_out: wp.array[wp.vec3],
++  contact_frame_out: wp.array[wp.mat33],
++  contact_includemargin_out: wp.array[float],
++  contact_friction_out: wp.array[vec5],
++  contact_solref_out: wp.array[wp.vec2],
++  contact_solreffriction_out: wp.array[wp.vec2],
++  contact_solimp_out: wp.array[vec5],
++  contact_dim_out: wp.array[int],
++  contact_geom_out: wp.array[wp.vec2i],
++  contact_efc_address_out: wp.array2d[int],
++  contact_worldid_out: wp.array[int],
++  contact_type_out: wp.array[int],
++  contact_geomcollisionid_out: wp.array[int],
++  contact_adhesion_out: wp.array[float],
++  nacon_out: wp.array[int],
++) -> int:
++  """Write a contact to a fixed slot, or atomically append when fixed_slot is negative.
+ 
+   Returns 1 if the contact is active (dist < margin or in-gap adhesive), 0 otherwise.
+   """
+@@ -268,7 +345,9 @@ def write_contact(
+   if pairid_in[1] >= 0:
+     contact_type |= ContactType.SENSOR
+ 
+-  cid = wp.atomic_add(nacon_out, 0, 1)
++  cid = fixed_slot
++  if cid < 0:
++    cid = wp.atomic_add(nacon_out, 0, 1)
+   if cid < naconmax_in:
+     contact_dist_out[cid] = dist_in
+     contact_pos_out[cid] = pos_in
+diff --git a/mujoco_warp/_src/collision_driver.py b/mujoco_warp/_src/collision_driver.py
+index 6b87720..6fe4304 100644
+--- a/mujoco_warp/_src/collision_driver.py
++++ b/mujoco_warp/_src/collision_driver.py
+@@ -23,6 +23,7 @@ from mujoco_warp._src.collision_core import create_collision_context
+ from mujoco_warp._src.collision_core import sap_binary_search
+ from mujoco_warp._src.collision_core import sap_range
+ from mujoco_warp._src.collision_flex import flex_collision
++from mujoco_warp._src.collision_order import order_contacts
+ from mujoco_warp._src.collision_primitive import primitive_narrowphase
+ from mujoco_warp._src.collision_sdf import sdf_narrowphase
+ from mujoco_warp._src.math import upper_tri_index
+@@ -953,6 +954,9 @@ def collision(
+     d.nacon.zero_()
+     return
+ 
++  if m.opt.deterministic_contacts and m.nflex:
++    raise NotImplementedError("deterministic_contacts currently supports rigid geom contacts only")
++
+   # TODO(team): create context outside collision?
+   ctx = create_collision_context(d.naconmax)
+ 
+@@ -982,3 +986,5 @@ def collision(
+ 
+   if m.callback.contactfilter:
+     m.callback.contactfilter(m, d)
++  if m.opt.deterministic_contacts:
++    order_contacts(d)
+diff --git a/mujoco_warp/_src/collision_sdf.py b/mujoco_warp/_src/collision_sdf.py
+index 93c25c6..0933f5a 100644
+--- a/mujoco_warp/_src/collision_sdf.py
++++ b/mujoco_warp/_src/collision_sdf.py
+@@ -20,10 +20,13 @@ import warp as wp
+ from mujoco_warp._src.collision_core import CollisionContext
+ from mujoco_warp._src.collision_core import contact_params
+ from mujoco_warp._src.collision_core import geom_collision_pair
+-from mujoco_warp._src.collision_core import write_contact
++from mujoco_warp._src.collision_core import write_contact_at_slot
++from mujoco_warp._src.collision_order import append_slots
++from mujoco_warp._src.collision_order import empty_contact_buffer
+ from mujoco_warp._src.math import make_frame
+ from mujoco_warp._src.ray import ray_mesh
+ from mujoco_warp._src.types import MJ_MINVAL
++from mujoco_warp._src.types import BroadphaseType
+ from mujoco_warp._src.types import Data
+ from mujoco_warp._src.types import GeomType
+ from mujoco_warp._src.types import Model
+@@ -895,6 +898,7 @@ def _sdf_narrowphase(
+   collision_worldid_in: wp.array[int],
+   sdf_initpoints: int,
+   sdf_iterations: int,
++  fixed_slots: bool,
+   # Data out:
+   contact_dist_out: wp.array[float],
+   contact_pos_out: wp.array[wp.vec3],
+@@ -1085,7 +1089,7 @@ def _sdf_narrowphase(
+     mesh_data1,
+     mesh_data2,
+   )
+-  write_contact(
++  write_contact_at_slot(
+     naconmax_in,
+     0,
+     dist,
+@@ -1102,6 +1106,7 @@ def _sdf_narrowphase(
+     geoms,
+     collision_pairid_in[contact_tid],
+     worldid,
++    contact_tid * sdf_initpoints + i if fixed_slots else -1,
+     contact_dist_out,
+     contact_pos_out,
+     contact_frame_out,
+@@ -1123,9 +1128,22 @@ def _sdf_narrowphase(
+ 
+ @event_scope
+ def sdf_narrowphase(m: Model, d: Data, ctx: CollisionContext):
++  capacity = d.naconmax
++  scratch = None
++  if m.opt.deterministic_contacts:
++    if m.opt.broadphase == BroadphaseType.NXN:
++      capacity = min(capacity, d.nworld * m.nxn_geom_pair_filtered.shape[0])
++    if not capacity or not m.opt.sdf_initpoints:
++      return
++    scratch = empty_contact_buffer(d.contact, capacity * m.opt.sdf_initpoints)
++    scratch.worldid.fill_(-1)
++    scratch.flex.fill_(-1)
++    scratch.elem.fill_(-1)
++    scratch.vert.fill_(-1)
++  contact = d.contact if scratch is None else scratch
+   wp.launch(
+     _sdf_narrowphase,
+-    dim=(m.opt.sdf_initpoints, d.naconmax),
++    dim=(m.opt.sdf_initpoints, capacity),
+     inputs=[
+       m.nmeshface,
+       m.oct_child,
+@@ -1174,7 +1192,7 @@ def sdf_narrowphase(m: Model, d: Data, ctx: CollisionContext):
+       m.geom_plugin_index,
+       d.geom_xpos,
+       d.geom_xmat,
+-      d.naconmax,
++      contact.worldid.shape[0],
+       d.ncollision,
+       getattr(m, "dense_sdf", DenseSDF()),
+       ctx.collision_pair,
+@@ -1182,23 +1200,26 @@ def sdf_narrowphase(m: Model, d: Data, ctx: CollisionContext):
+       ctx.collision_worldid,
+       m.opt.sdf_initpoints,
+       m.opt.sdf_iterations,
++      m.opt.deterministic_contacts,
+     ],
+     outputs=[
+-      d.contact.dist,
+-      d.contact.pos,
+-      d.contact.frame,
+-      d.contact.includemargin,
+-      d.contact.friction,
+-      d.contact.solref,
+-      d.contact.solreffriction,
+-      d.contact.solimp,
+-      d.contact.dim,
+-      d.contact.geom,
+-      d.contact.efc_address,
+-      d.contact.worldid,
+-      d.contact.type,
+-      d.contact.geomcollisionid,
+-      d.contact.adhesion,
++      contact.dist,
++      contact.pos,
++      contact.frame,
++      contact.includemargin,
++      contact.friction,
++      contact.solref,
++      contact.solreffriction,
++      contact.solimp,
++      contact.dim,
++      contact.geom,
++      contact.efc_address,
++      contact.worldid,
++      contact.type,
++      contact.geomcollisionid,
++      contact.adhesion,
+       d.nacon,
+     ],
+   )
++  if scratch is not None:
++    append_slots(scratch, d)
+diff --git a/mujoco_warp/_src/constraint.py b/mujoco_warp/_src/constraint.py
+index 9017e55..4949b66 100644
+--- a/mujoco_warp/_src/constraint.py
++++ b/mujoco_warp/_src/constraint.py
+@@ -20,6 +20,7 @@ import warp as wp
+ from mujoco_warp._src import math
+ from mujoco_warp._src import support
+ from mujoco_warp._src import types
++from mujoco_warp._src.constraint_order import order_constraints_dense
+ from mujoco_warp._src.types import ConstraintType
+ from mujoco_warp._src.types import ContactType
+ from mujoco_warp._src.types import DisableBit
+@@ -5876,3 +5877,6 @@ def make_constraint(m: types.Model, d: types.Data):
+             d.efc.frictionloss,
+           ],
+         )
++
++  if m.opt.deterministic_contacts and not m.is_sparse:
++    order_constraints_dense(d)
+diff --git a/mujoco_warp/_src/io.py b/mujoco_warp/_src/io.py
+index f98b14f..4382870 100644
+--- a/mujoco_warp/_src/io.py
++++ b/mujoco_warp/_src/io.py
+@@ -360,6 +360,7 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
+   opt.broadphase = types.BroadphaseType.NXN
+   opt.broadphase_filter = types.BroadphaseFilter.PLANE | types.BroadphaseFilter.SPHERE | types.BroadphaseFilter.OBB
+   opt.graph_conditional = True
++  opt.deterministic_contacts = False
+   opt.run_collision_detection = True
+   opt.warn_overflow = int(types.OverflowType.ALL)
+   opt.run_rne_postconstraint = False
+diff --git a/mujoco_warp/_src/solver.py b/mujoco_warp/_src/solver.py
+index 5e9c739..cf1618c 100644
+--- a/mujoco_warp/_src/solver.py
++++ b/mujoco_warp/_src/solver.py
+@@ -2501,6 +2501,86 @@ def _elliptic_hessian_entry_from_projections(
+   )
+ 
+ 
++@wp.func
++def _elliptic_contact_hessian_entry(
++  # Model:
++  opt_impratio_invsqrt: wp.array[float],
++  # Data in:
++  contact_dist_in: wp.array[float],
++  contact_includemargin_in: wp.array[float],
++  contact_friction_in: wp.array[types.vec5],
++  contact_dim_in: wp.array[int],
++  contact_efc_address_in: wp.array2d[int],
++  efc_J_in: wp.array3d[float],
++  efc_D_in: wp.array2d[float],
++  efc_state_in: wp.array2d[int],
++  # In:
++  ctx_Jaref_in: wp.array2d[float],
++  conid: int,
++  worldid: int,
++  dof1id: int,
++  dof2id: int,
++) -> tuple[bool, float]:
++  condim = contact_dim_in[conid]
++
++  if condim == 1:
++    return False, 0.0
++
++  # check contact status
++  if contact_dist_in[conid] - contact_includemargin_in[conid] >= 0.0:
++    return False, 0.0
++
++  efcid0 = contact_efc_address_in[conid, 0]
++  if efcid0 < 0:
++    return False, 0.0
++  if efc_state_in[worldid, efcid0] != types.ConstraintState.CONE:
++    return False, 0.0
++
++  fri = contact_friction_in[conid]
++  mu = fri[0] * opt_impratio_invsqrt[worldid % opt_impratio_invsqrt.shape[0]]
++
++  mu2 = mu * mu
++  dm = math.safe_div(efc_D_in[worldid, efcid0], mu2 * (1.0 + mu2))
++
++  if dm == 0.0:
++    return False, 0.0
++
++  n = ctx_Jaref_in[worldid, efcid0] * mu
++  z01 = mu * efc_J_in[worldid, efcid0, dof1id]
++  z02 = mu * efc_J_in[worldid, efcid0, dof2id]
++  tt = float(0.0)
++  projection1 = float(0.0)
++  projection2 = float(0.0)
++  tangent_dot = float(0.0)
++  for dim in range(1, condim):
++    efcid = contact_efc_address_in[conid, dim]
++    if efcid >= 0:
++      scale = fri[dim - 1]
++      u = ctx_Jaref_in[worldid, efcid] * scale
++      z1 = scale * efc_J_in[worldid, efcid, dof1id]
++      z2 = scale * efc_J_in[worldid, efcid, dof2id]
++      tt += u * u
++      projection1 += u * z1
++      projection2 += u * z2
++      tangent_dot += z1 * z2
++
++  t = wp.max(wp.sqrt(tt), types.MJ_MINVAL)
++  inv_t = math.safe_div(1.0, t)
++  mu_n_over_t = mu * n * inv_t
++  h = _elliptic_hessian_entry_from_projections(
++    dm,
++    mu,
++    mu_n_over_t,
++    mu2 - mu_n_over_t,
++    z01,
++    z02,
++    projection1 * inv_t,
++    projection2 * inv_t,
++    tangent_dot,
++  )
++  return True, h
++
++
+ @wp.kernel
+ def _update_gradient_JTCJ_dense(
+   # Model:
+@@ -2542,65 +2622,96 @@ def _update_gradient_JTCJ_dense(
+     if ctx_done_in[worldid]:
+       continue
+ 
+-    condim = contact_dim_in[conid]
+-
+-    if condim == 1:
+-      continue
+-
+-    # check contact status
+-    if contact_dist_in[conid] - contact_includemargin_in[conid] >= 0.0:
+-      continue
+-
+-    efcid0 = contact_efc_address_in[conid, 0]
+-    if efcid0 < 0:
+-      continue
+-    if efc_state_in[worldid, efcid0] != types.ConstraintState.CONE:
+-      continue
+-
+-    fri = contact_friction_in[conid]
+-    mu = fri[0] * opt_impratio_invsqrt[worldid % opt_impratio_invsqrt.shape[0]]
+-
+-    mu2 = mu * mu
+-    dm = math.safe_div(efc_D_in[worldid, efcid0], mu2 * (1.0 + mu2))
+-
+-    if dm == 0.0:
+-      continue
++    active, h = _elliptic_contact_hessian_entry(
++      opt_impratio_invsqrt,
++      contact_dist_in,
++      contact_includemargin_in,
++      contact_friction_in,
++      contact_dim_in,
++      contact_efc_address_in,
++      efc_J_in,
++      efc_D_in,
++      efc_state_in,
++      ctx_Jaref_in,
++      conid,
++      worldid,
++      dof1id,
++      dof2id,
++    )
++    if active:
++      ctx_h_out[worldid, dof1id, dof2id] += h
+ 
+-    n = ctx_Jaref_in[worldid, efcid0] * mu
+-    z01 = mu * efc_J_in[worldid, efcid0, dof1id]
+-    z02 = mu * efc_J_in[worldid, efcid0, dof2id]
+-    tt = float(0.0)
+-    projection1 = float(0.0)
+-    projection2 = float(0.0)
+-    tangent_dot = float(0.0)
+-    for dim in range(1, condim):
+-      efcid = contact_efc_address_in[conid, dim]
+-      if efcid >= 0:
+-        scale = fri[dim - 1]
+-        u = ctx_Jaref_in[worldid, efcid] * scale
+-        z1 = scale * efc_J_in[worldid, efcid, dof1id]
+-        z2 = scale * efc_J_in[worldid, efcid, dof2id]
+-        tt += u * u
+-        projection1 += u * z1
+-        projection2 += u * z2
+-        tangent_dot += z1 * z2
+ 
+-    t = wp.max(wp.sqrt(tt), types.MJ_MINVAL)
+-    inv_t = math.safe_div(1.0, t)
+-    mu_n_over_t = mu * n * inv_t
+-    h = _elliptic_hessian_entry_from_projections(
+-      dm,
+-      mu,
+-      mu_n_over_t,
+-      mu2 - mu_n_over_t,
+-      z01,
+-      z02,
+-      projection1 * inv_t,
+-      projection2 * inv_t,
+-      tangent_dot,
++@wp.kernel
++def _update_gradient_JTCJ_dense_ordered(
++  # Model:
++  opt_impratio_invsqrt: wp.array[float],
++  dof_tri_row: wp.array[int],
++  dof_tri_col: wp.array[int],
++  # Data in:
++  contact_dist_in: wp.array[float],
++  contact_includemargin_in: wp.array[float],
++  contact_friction_in: wp.array[types.vec5],
++  contact_dim_in: wp.array[int],
++  contact_efc_address_in: wp.array2d[int],
++  contact_worldid_in: wp.array[int],
++  efc_J_in: wp.array3d[float],
++  efc_D_in: wp.array2d[float],
++  efc_state_in: wp.array2d[int],
++  naconmax_in: int,
++  nacon_in: wp.array[int],
++  # In:
++  ctx_Jaref_in: wp.array2d[float],
++  ctx_done_in: wp.array[bool],
++  # Out:
++  ctx_h_out: wp.array3d[float],
++):
++  # Canonical contacts are grouped by world. One writer per upper-triangle
++  # entry visits that world's contacts in order, avoiding floating-point atomics.
++  worldid, elementid = wp.tid()
++  if ctx_done_in[worldid]:
++    return
++  dof1id = dof_tri_row[elementid]
++  dof2id = dof_tri_col[elementid]
++  limit = min(nacon_in[0], naconmax_in)
++  lower = int(0)
++  upper = limit
++  while lower < upper:
++    mid = (lower + upper) // 2
++    if contact_worldid_in[mid] < worldid:
++      lower = mid + 1
++    else:
++      upper = mid
++  first = lower
++  upper = limit
++  while lower < upper:
++    mid = (lower + upper) // 2
++    if contact_worldid_in[mid] <= worldid:
++      lower = mid + 1
++    else:
++      upper = mid
++  last = lower
++  sum_h = ctx_h_out[worldid, dof1id, dof2id]
++  for conid in range(first, last):
++    active, h = _elliptic_contact_hessian_entry(
++      opt_impratio_invsqrt,
++      contact_dist_in,
++      contact_includemargin_in,
++      contact_friction_in,
++      contact_dim_in,
++      contact_efc_address_in,
++      efc_J_in,
++      efc_D_in,
++      efc_state_in,
++      ctx_Jaref_in,
++      conid,
++      worldid,
++      dof1id,
++      dof2id,
+     )
+-
+-    ctx_h_out[worldid, dof1id, dof2id] += h
++    if active:
++      sum_h += h
++  ctx_h_out[worldid, dof1id, dof2id] = sum_h
+ 
+ 
+ @cache_kernel
+@@ -3208,14 +3319,13 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
+         )
+ 
+     if m.opt.cone == types.ConeType.ELLIPTIC and not (m.is_sparse or sc):
+-      # Optimization: launching update_gradient_JTCJ with limited number of blocks on a GPU.
+-      # Profiling suggests that only a fraction of blocks out of the original
+-      # d.njmax blocks do the actual work. It aims to minimize #CTAs with no
+-      # effective work. It launches with #blocks that's proportional to the number
+-      # of SMs on the GPU. We can now query the SM count:
+-      # https://github.com/NVIDIA/warp/commit/f3814e7e5459e5fd13032cf0fddb3daddd510f30
+-
+-      if wp.get_device().is_cuda:
++      # Canonical contacts allow one ordered writer per world and Hessian entry.
++      # The legacy path limits its contact-parallel grid using the GPU SM count.
++      ordered = m.opt.deterministic_contacts
++      if ordered:
++        dim_block = d.nworld
++        nblocks_perblock = 0
++      elif wp.get_device().is_cuda:
+         sm_count = wp.get_device().sm_count
+ 
+         # Here we assume one block has 256 threads. We use a factor of 6, which
+@@ -3227,10 +3337,11 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
+         # fall back for CPU
+         dim_block = d.naconmax
+ 
+-      nblocks_perblock = int((d.naconmax + dim_block - 1) / dim_block)
++      if not ordered:
++        nblocks_perblock = int((d.naconmax + dim_block - 1) / dim_block)
+ 
+       wp.launch(
+-        _update_gradient_JTCJ_dense,
++        _update_gradient_JTCJ_dense_ordered if ordered else _update_gradient_JTCJ_dense,
+         dim=(dim_block, m.dof_tri_row.size),
+         inputs=[
+           m.opt.impratio_invsqrt,
+@@ -3249,9 +3360,8 @@ def _update_gradient(m: types.Model, d: types.Data, ctx: SolverContext, compact:
+           d.nacon,
+           ctx.Jaref,
+           ctx.done,
+-          nblocks_perblock,
+-          dim_block,
+-        ],
++        ]
++        + ([] if ordered else [nblocks_perblock, dim_block]),
+         outputs=[ctx.h],
+       )
+ 
+diff --git a/mujoco_warp/_src/solver_test.py b/mujoco_warp/_src/solver_test.py
+index 9398d2e..8c0667d 100644
+--- a/mujoco_warp/_src/solver_test.py
++++ b/mujoco_warp/_src/solver_test.py
+@@ -877,7 +877,8 @@ class SolverTest(parameterized.TestCase):
+     self.assertTrue(np.all(np.isfinite(qacc)), "Newton solve produced non-finite qacc")
+     _assert_eq(qacc, mjd.qacc, "qacc")
+ 
+-  def test_elliptic_dense_hessian(self):
++  @parameterized.parameters(False, True)
++  def test_elliptic_dense_hessian(self, ordered):
+     """Structured dense cone contraction matches the reference Hessian."""
+     condims = (3, 4, 6)
+     bodies = "".join(
+@@ -901,49 +902,77 @@ class SolverTest(parameterized.TestCase):
+     mujoco.mj_forward(mjm, mjd)
+     self.assertEqual(set(mjd.contact.dim[: mjd.ncon]), set(condims))
+ 
+-    d = mjw.put_data(mjm, mjd)
++    m.opt.deterministic_contacts = ordered
++    d = mjw.put_data(mjm, mjd, nworld=4)
+     ctx = solver._create_solver_context(m, d)
+     solver.init_context(m, d, ctx, grad=True)
+-    ctx.h.zero_()
+-    ctx.done.fill_(False)
++    # Multiple worlds, converged worlds, and worlds without cone contributions.
++    done = np.array([False, True, False, False])
++    wp.copy(ctx.done, wp.array(done, dtype=bool))
++    state = d.efc.state.numpy()
++    state[3] = types.ConstraintState.SATISFIED.value
++    wp.copy(d.efc.state, wp.array(state, dtype=int))
++    base = np.tile(np.eye(m.nv_pad, dtype=np.float32)[None] * 0.25, (d.nworld, 1, 1))
++    base_h = wp.array(base, dtype=float)
++    reference = base[:, : m.nv, : m.nv] + _elliptic_dense_hessian_reference(m, d, ctx)
++    reference[1] = base[1, : m.nv, : m.nv]
++    active = d.efc.state.numpy() == types.ConstraintState.CONE.value
++    self.assertGreater(np.count_nonzero(active[0]), 1)
+ 
+     if wp.get_device().is_cuda:
+       dim_block = (wp.get_device().sm_count * 6 * 256 + m.dof_tri_row.size - 1) // m.dof_tri_row.size
+     else:
+       dim_block = d.naconmax
+     nblocks_perblock = (d.naconmax + dim_block - 1) // dim_block
+-    wp.launch(
+-      solver._update_gradient_JTCJ_dense,
+-      dim=(dim_block, m.dof_tri_row.size),
+-      inputs=[
+-        m.opt.impratio_invsqrt,
+-        m.dof_tri_row,
+-        m.dof_tri_col,
+-        d.contact.dist,
+-        d.contact.includemargin,
+-        d.contact.friction,
+-        d.contact.dim,
+-        d.contact.efc_address,
+-        d.contact.worldid,
+-        d.efc.J,
+-        d.efc.D,
+-        d.efc.state,
+-        d.naconmax,
+-        d.nacon,
+-        ctx.Jaref,
+-        ctx.done,
+-        nblocks_perblock,
+-        dim_block,
+-      ],
+-      outputs=[ctx.h],
+-    )
+ 
+-    np.testing.assert_allclose(
+-      ctx.h.numpy()[:, : m.nv, : m.nv],
+-      _elliptic_dense_hessian_reference(m, d, ctx),
+-      rtol=1e-5,
+-      atol=1e-6,
+-    )
++    def build_hessian():
++      wp.copy(ctx.h, base_h)
++      wp.launch(
++        solver._update_gradient_JTCJ_dense_ordered if ordered else solver._update_gradient_JTCJ_dense,
++        dim=(d.nworld if ordered else dim_block, m.dof_tri_row.size),
++        inputs=[
++          m.opt.impratio_invsqrt,
++          m.dof_tri_row,
++          m.dof_tri_col,
++          d.contact.dist,
++          d.contact.includemargin,
++          d.contact.friction,
++          d.contact.dim,
++          d.contact.efc_address,
++          d.contact.worldid,
++          d.efc.J,
++          d.efc.D,
++          d.efc.state,
++          d.naconmax,
++          d.nacon,
++          ctx.Jaref,
++          ctx.done,
++        ]
++        + ([] if ordered else [nblocks_perblock, dim_block]),
++        outputs=[ctx.h],
++      )
++
++    if wp.get_device().is_cuda and not wp.config.verify_cuda:
++      with wp.ScopedCapture() as capture:
++        build_hessian()
++      run_hessian = lambda: wp.capture_launch(capture.graph)
++    else:
++      run_hessian = build_hessian
++
++    first = None
++    for _ in range(30 if ordered else 1):
++      run_hessian()
++      result = ctx.h.numpy()
++      np.testing.assert_allclose(result[:, : m.nv, : m.nv], reference, rtol=1e-5, atol=1e-6)
++      if first is not None:
++        np.testing.assert_array_equal(result.view(np.uint8), first.view(np.uint8))
++      first = result.copy()
++
++    # Replaying the same graph with no active contacts preserves the base Hessian.
++    if ordered:
++      d.nacon.zero_()
++      run_hessian()
++      np.testing.assert_array_equal(ctx.h.numpy(), base)
+ 
+   @parameterized.parameters("dense", "sparse")
+   def test_elliptic_hessian_scale_invariance(self, jacobian):
+diff --git a/mujoco_warp/_src/types.py b/mujoco_warp/_src/types.py
+index d2c6823..4f742f0 100644
+--- a/mujoco_warp/_src/types.py
++++ b/mujoco_warp/_src/types.py
+@@ -922,6 +922,7 @@ class Option:
+     broadphase: broadphase type (BroadphaseType)
+     broadphase_filter: broadphase filter bitflag (BroadphaseFilter)
+     graph_conditional: flag to use cuda graph conditional
++    deterministic_contacts: use canonical contacts, dense constraint rows, and dense cone Hessians
+     run_collision_detection: if False, skips collision detection and allows user-populated
+       contacts during the physics step (as opposed to DisableBit.CONTACT which explicitly
+       zeros out the contacts at each step)
+@@ -957,6 +958,7 @@ class Option:
+   broadphase: BroadphaseType
+   broadphase_filter: BroadphaseFilter
+   graph_conditional: bool
++  deterministic_contacts: bool
+   run_collision_detection: bool
+   run_rne_postconstraint: bool
+   contact_sensor_maxmatch: int
+diff --git a/mujoco_warp/_src/collision_order.py b/mujoco_warp/_src/collision_order.py
+new file mode 100644
+index 0000000..3bdf20e
+--- /dev/null
++++ b/mujoco_warp/_src/collision_order.py
+@@ -0,0 +1,261 @@
++# Copyright 2026 The Newton Developers
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++
++"""Deterministic contact compaction and ordering without floating-point reductions."""
++
++import dataclasses
++
++import warp as wp
++
++from mujoco_warp._src.types import vec5
++
++wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
++
++
++@wp.struct
++class ContactBuffer:
++  dist: wp.array[float]
++  pos: wp.array[wp.vec3]
++  frame: wp.array[wp.mat33]
++  includemargin: wp.array[float]
++  friction: wp.array[vec5]
++  solref: wp.array[wp.vec2]
++  solreffriction: wp.array[wp.vec2]
++  solimp: wp.array[vec5]
++  dim: wp.array[int]
++  geom: wp.array[wp.vec2i]
++  flex: wp.array[wp.vec2i]
++  elem: wp.array[wp.vec2i]
++  vert: wp.array[wp.vec2i]
++  efc_address: wp.array2d[int]
++  worldid: wp.array[int]
++  type: wp.array[int]
++  geomcollisionid: wp.array[int]
++  adhesion: wp.array[float]
++
++
++def contact_buffer(contact):
++  """Wrap the complete contact record; sorting must move every field together."""
++  buffer = ContactBuffer()
++  for field in dataclasses.fields(contact):
++    setattr(buffer, field.name, getattr(contact, field.name))
++  return buffer
++
++
++def empty_contact_buffer(contact, capacity):
++  """Allocate scratch records with the same dtypes and constraint address width."""
++  buffer = ContactBuffer()
++  for field in dataclasses.fields(contact):
++    array = getattr(contact, field.name)
++    shape = (capacity if array.size else 0, *array.shape[1:])
++    setattr(buffer, field.name, wp.empty(shape, dtype=array.dtype))
++  return buffer
++
++
++@wp.func
++def copy_contact(source: ContactBuffer, target: ContactBuffer, src: int, dst: int):
++  target.dist[dst] = source.dist[src]
++  target.pos[dst] = source.pos[src]
++  target.frame[dst] = source.frame[src]
++  target.includemargin[dst] = source.includemargin[src]
++  target.friction[dst] = source.friction[src]
++  target.solref[dst] = source.solref[src]
++  target.solreffriction[dst] = source.solreffriction[src]
++  target.solimp[dst] = source.solimp[src]
++  target.dim[dst] = source.dim[src]
++  target.geom[dst] = source.geom[src]
++  if source.flex.shape[0]:
++    target.flex[dst] = source.flex[src]
++    target.elem[dst] = source.elem[src]
++    target.vert[dst] = source.vert[src]
++  target.worldid[dst] = source.worldid[src]
++  target.type[dst] = source.type[src]
++  target.geomcollisionid[dst] = source.geomcollisionid[src]
++  target.adhesion[dst] = source.adhesion[src]
++  for dim in range(source.efc_address.shape[1]):
++    target.efc_address[dst, dim] = source.efc_address[src, dim]
++
++
++@wp.func
++def integer_key(contact: ContactBuffer, index: int, component: int) -> int:
++  if component < 2:
++    return contact.geom[index][component]
++  if component < 4:
++    if contact.flex.shape[0]:
++      return contact.flex[index][component - 2]
++    return -1
++  if component < 6:
++    if contact.elem.shape[0]:
++      return contact.elem[index][component - 4]
++    return -1
++  if component < 8:
++    if contact.vert.shape[0]:
++      return contact.vert[index][component - 6]
++    return -1
++  if component == 8:
++    return contact.geomcollisionid[index]
++  if component == 9:
++    return contact.dim[index]
++  return contact.type[index]
++
++
++@wp.func
++def float_key(contact: ContactBuffer, index: int, component: int) -> float:
++  if component == 0:
++    return contact.dist[index]
++  if component < 4:
++    return contact.pos[index][component - 1]
++  if component < 13:
++    offset = component - 4
++    return contact.frame[index][offset // 3, offset % 3]
++  if component == 13:
++    return contact.includemargin[index]
++  if component < 19:
++    return contact.friction[index][component - 14]
++  if component < 21:
++    return contact.solref[index][component - 19]
++  if component < 23:
++    return contact.solreffriction[index][component - 21]
++  if component < 28:
++    return contact.solimp[index][component - 23]
++  return contact.adhesion[index]
++
++
++@wp.func
++def contact_less(contact: ContactBuffer, a: int, b: int) -> bool:
++  for component in range(11):
++    ka = integer_key(contact, a, component)
++    kb = integer_key(contact, b, component)
++    if ka != kb:
++      return ka < kb
++  for component in range(29):
++    fa = float_key(contact, a, component)
++    fb = float_key(contact, b, component)
++    if wp.isnan(fa) != wp.isnan(fb):
++      return not wp.isnan(fa)
++    if not wp.isnan(fa):
++      if fa != fb:
++        return fa < fb
++      if fa == 0.0 and wp.copysign(1.0, fa) != wp.copysign(1.0, fb):
++        return wp.copysign(1.0, fa) < wp.copysign(1.0, fb)
++  # Equal physical records are interchangeable; this only makes their ranks unique.
++  return a < b
++
++
++@wp.kernel
++def _world_keys(count: wp.array[int], contact: ContactBuffer, keys_out: wp.array[int], indices_out: wp.array[int]):
++  index = wp.tid()
++  key = int(2147483647)
++  if index < count[0]:
++    key = contact.worldid[index]
++  keys_out[index] = key
++  indices_out[index] = index
++
++
++@wp.kernel
++def _contact_ranks(
++  count: wp.array[int], contact: ContactBuffer, keys: wp.array[int], indices: wp.array[int], order_out: wp.array[int]
++):
++  index = wp.tid()
++  limit = wp.min(count[0], contact.worldid.shape[0])
++  if index >= limit:
++    return
++  world = keys[index]
++  lower = int(0)
++  upper = index
++  while lower < upper:
++    mid = (lower + upper) // 2
++    if keys[mid] < world:
++      lower = mid + 1
++    else:
++      upper = mid
++  first = lower
++  lower = index + 1
++  upper = limit
++  while lower < upper:
++    mid = (lower + upper) // 2
++    if keys[mid] <= world:
++      lower = mid + 1
++    else:
++      upper = mid
++  last = lower
++  source = indices[index]
++  rank = first
++  for other in range(first, last):
++    if contact_less(contact, indices[other], source):
++      rank += 1
++  order_out[rank] = source
++
++
++@wp.kernel
++def _gather(count: wp.array[int], source: ContactBuffer, target: ContactBuffer, order: wp.array[int]):
++  index = wp.tid()
++  if index < count[0]:
++    copy_contact(source, target, order[index], index)
++
++
++def order_contacts(data):
++  """Canonically order finite contacts by world and complete physical record on the GPU.
++
++  This fixes emission order, not solver reductions. Overflow still invalidates reproducibility.
++  Ranking is quadratic in each world's contact count, rather than in the whole batch size.
++  """
++  capacity = data.naconmax
++  if not capacity:
++    return
++  source = contact_buffer(data.contact)
++  scratch = empty_contact_buffer(data.contact, capacity)
++  keys = wp.empty(2 * capacity, dtype=int)
++  indices = wp.empty(2 * capacity, dtype=int)
++  order = wp.empty(capacity, dtype=int)
++  wp.launch(_world_keys, dim=capacity, inputs=[data.nacon, source], outputs=[keys, indices])
++  wp.utils.radix_sort_pairs(keys, indices, capacity)
++  wp.launch(_contact_ranks, dim=capacity, inputs=[data.nacon, source, keys, indices], outputs=[order])
++  wp.launch(_gather, dim=capacity, inputs=[data.nacon, source, scratch, order])
++  for field in dataclasses.fields(data.contact):
++    if getattr(data.contact, field.name).size:
++      wp.copy(getattr(data.contact, field.name), getattr(scratch, field.name))
++
++
++@wp.kernel
++def _valid_slots(worldid: wp.array[int], valid_out: wp.array[int]):
++  index = wp.tid()
++  valid_out[index] = int(worldid[index] >= 0)
++
++
++@wp.kernel
++def _compact_slots(source: ContactBuffer, target: ContactBuffer, prefix: wp.array[int], count: wp.array[int]):
++  index = wp.tid()
++  if source.worldid[index] < 0:
++    return
++  destination = count[0] + prefix[index] - 1
++  if destination < target.worldid.shape[0]:
++    copy_contact(source, target, index, destination)
++
++
++@wp.kernel
++def _append_count(prefix: wp.array[int], count_out: wp.array[int]):
++  count_out[0] = count_out[0] + prefix[prefix.shape[0] - 1]
++
++
++def append_slots(source, data):
++  """Compact fixed SDF slots with an integer prefix scan, preserving overflow counts."""
++  capacity = source.worldid.shape[0]
++  valid = wp.empty(capacity, dtype=int)
++  prefix = wp.empty(capacity, dtype=int)
++  wp.launch(_valid_slots, dim=capacity, inputs=[source.worldid], outputs=[valid])
++  wp.utils.array_scan(valid, prefix)
++  wp.launch(_compact_slots, dim=capacity, inputs=[source, contact_buffer(data.contact), prefix, data.nacon])
++  wp.launch(_append_count, dim=1, inputs=[prefix, data.nacon])
+diff --git a/mujoco_warp/_src/collision_order_test.py b/mujoco_warp/_src/collision_order_test.py
+new file mode 100644
+index 0000000..e9c57da
+--- /dev/null
++++ b/mujoco_warp/_src/collision_order_test.py
+@@ -0,0 +1,99 @@
++# Copyright 2026 The Newton Developers
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++
++"""Checks canonical contact ordering and fixed-slot compaction."""
++
++import dataclasses
++
++import mujoco
++import numpy as np
++import pytest
++import warp as wp
++
++import mujoco_warp as mjw
++from mujoco_warp._src.collision_order import append_slots
++from mujoco_warp._src.collision_order import empty_contact_buffer
++from mujoco_warp._src.collision_order import order_contacts
++
++
++@pytest.fixture
++def data():
++  if not wp.is_cuda_available():
++    pytest.skip("CUDA unavailable")
++  model = mujoco.MjModel.from_xml_string('<mujoco><worldbody><geom type="sphere" size="1"/></worldbody></mujoco>')
++  with wp.ScopedDevice("cuda:0"):
++    yield mjw.make_data(model, nworld=2, nconmax=8, njmax=64)
++
++
++def test_permutations_preserve_complete_records(data):
++  rng = np.random.default_rng(4)
++  records = {}
++  for field in dataclasses.fields(data.contact):
++    array = getattr(data.contact, field.name)
++    if not array.size:
++      continue
++    host = array.numpy()
++    values = rng.normal(size=host.shape).astype(host.dtype) if host.dtype.kind == "f" else rng.integers(0, 8, host.shape)
++    records[field.name] = values.astype(host.dtype)
++  records["worldid"][:6] = [1, 0, 1, 0, 1, 0]
++  records["geom"][:6] = [0, 0]
++  records["geomcollisionid"][:6] = 0
++  records["dim"][:6] = 3
++  records["type"][:6] = 1
++  records["dist"][:6] = [0.0, -0.0, -0.1, -0.1, 0.0, -0.0]
++  wp.copy(data.nacon, wp.array([6], dtype=int))
++  with wp.ScopedCapture() as capture:
++    order_contacts(data)
++  first = None
++  for _ in range(8):
++    permutation = rng.permutation(6)
++    for name, values in records.items():
++      shuffled = values.copy()
++      shuffled[:6] = values[permutation]
++      array = getattr(data.contact, name)
++      wp.copy(array, wp.array(shuffled, dtype=array.dtype))
++    wp.capture_launch(capture.graph)
++    actual = {name: getattr(data.contact, name).numpy()[:6].copy() for name in records}
++    if first is None:
++      first = actual
++    for name, values in actual.items():
++      assert values.tobytes() == first[name].tobytes(), name
++      # Every complete record, including the constraint addresses, remains intact.
++      for row in values:
++        assert any(np.array_equal(row, original) for original in records[name][:6])
++    np.testing.assert_array_equal(actual["worldid"], [0, 0, 0, 1, 1, 1])
++  # Reusing the captured graph for an empty frame must not resurrect stale contacts.
++  data.nacon.zero_()
++  wp.capture_launch(capture.graph)
++  assert data.nacon.numpy()[0] == 0
++
++
++def test_fixed_slot_compaction_preserves_overflow_count(data):
++  slots = empty_contact_buffer(data.contact, 20)
++  for field in dataclasses.fields(data.contact):
++    array = getattr(slots, field.name)
++    if array.size:
++      array.zero_()
++  slots.worldid.fill_(-1)
++  worlds = np.array([0 if i % 3 else -1 for i in range(20)], dtype=np.int32)
++  wp.copy(slots.worldid, wp.array(worlds, dtype=int))
++  wp.copy(slots.dist, wp.array(np.arange(20, dtype=np.float32)))
++  wp.copy(data.nacon, wp.array([8], dtype=int))
++  with wp.ScopedCapture() as capture:
++    append_slots(slots, data)
++  wp.capture_launch(capture.graph)
++  expected = np.flatnonzero(worlds >= 0)
++  assert data.nacon.numpy()[0] == 8 + len(expected) > data.naconmax
++  np.testing.assert_array_equal(data.contact.dist.numpy()[8:], expected[: data.naconmax - 8])
+diff --git a/mujoco_warp/_src/constraint_order.py b/mujoco_warp/_src/constraint_order.py
+new file mode 100644
+index 0000000..454bb6f
+--- /dev/null
++++ b/mujoco_warp/_src/constraint_order.py
+@@ -0,0 +1,155 @@
++# Copyright 2025 The Newton Developers
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++
++"""Canonical dense constraint rows after temporary atomic allocation."""
++
++import warp as wp
++
++wp.set_module_options({"enable_backward": False})
++
++
++@wp.struct
++class RowBuffer:
++  type: wp.array2d[int]
++  id: wp.array2d[int]
++  pos: wp.array2d[float]
++  margin: wp.array2d[float]
++  D: wp.array2d[float]
++  vel: wp.array2d[float]
++  aref: wp.array2d[float]
++  frictionloss: wp.array2d[float]
++  force: wp.array2d[float]
++  state: wp.array2d[int]
++  island: wp.array2d[int]
++  Jqvel: wp.array2d[float]
++
++
++_FIELDS = ("type", "id", "pos", "margin", "D", "vel", "aref", "frictionloss", "force", "state", "island", "Jqvel")
++
++
++@wp.kernel
++def _row_order(
++  # Data in:
++  nefc_in: wp.array[int],
++  efc_type_in: wp.array2d[int],
++  efc_id_in: wp.array2d[int],
++  # Out:
++  order_out: wp.array2d[int],
++  inverse_out: wp.array2d[int],
++):
++  world, row = wp.tid()
++  count = wp.min(nefc_in[world], efc_type_in.shape[1])
++  if row >= count:
++    order_out[world, row] = row
++    inverse_out[world, row] = row
++    return
++  kind = efc_type_in[world, row]
++  identity = efc_id_in[world, row]
++  rank = int(0)
++  # Every constraint block is allocated contiguously. Stable ties preserve
++  # its intrinsic component order; type/id order is independent of scheduling.
++  for other in range(count):
++    other_kind = efc_type_in[world, other]
++    other_id = efc_id_in[world, other]
++    if other_kind < kind or (other_kind == kind and (other_id < identity or (other_id == identity and other < row))):
++      rank += 1
++  order_out[world, rank] = row
++  inverse_out[world, row] = rank
++
++
++@wp.kernel
++def _gather_rows(
++  # In:
++  source: RowBuffer,
++  order: wp.array2d[int],
++  # Out:
++  target: RowBuffer,
++):
++  world, row = wp.tid()
++  old = order[world, row]
++  # Copy padding too: tile loads may read it before applying an inactive mask.
++  target.D[world, row] = source.D[world, old]
++  target.state[world, row] = source.state[world, old]
++  if row < source.type.shape[1]:
++    target.type[world, row] = source.type[world, old]
++    target.id[world, row] = source.id[world, old]
++    target.pos[world, row] = source.pos[world, old]
++    target.margin[world, row] = source.margin[world, old]
++    target.vel[world, row] = source.vel[world, old]
++    target.aref[world, row] = source.aref[world, old]
++    target.frictionloss[world, row] = source.frictionloss[world, old]
++    target.force[world, row] = source.force[world, old]
++    target.island[world, row] = source.island[world, old]
++    target.Jqvel[world, row] = source.Jqvel[world, old]
++
++
++@wp.kernel
++def _gather_jacobian(
++  # In:
++  source: wp.array3d[float],
++  order: wp.array2d[int],
++  # Out:
++  jacobian_out: wp.array3d[float],
++):
++  world, row, dof = wp.tid()
++  jacobian_out[world, row, dof] = source[world, order[world, row], dof]
++
++
++@wp.kernel
++def _remap_contacts(
++  # Data in:
++  contact_worldid_in: wp.array[int],
++  nacon_in: wp.array[int],
++  # In:
++  inverse: wp.array2d[int],
++  # Data out:
++  contact_efc_address_out: wp.array2d[int],
++):
++  contact, component = wp.tid()
++  if contact >= nacon_in[0]:
++    return
++  old = contact_efc_address_out[contact, component]
++  if old >= 0 and old < inverse.shape[1]:
++    contact_efc_address_out[contact, component] = inverse[contact_worldid_in[contact], old]
++
++
++def order_constraints_dense(data):
++  """Fix dense row layout without changing arithmetic or dropping inactive padding.
++
++  Equality/friction/limit/contact categories keep their required relative order.
++  Contact identities must already be canonical. Overflow invalidates reproducibility.
++  Sparse Jacobian storage and its block metadata are not handled here.
++  """
++  if not data.njmax:
++    return
++  source, target = RowBuffer(), RowBuffer()
++  for field in _FIELDS:
++    setattr(source, field, getattr(data.efc, field))
++    setattr(target, field, wp.empty_like(getattr(data.efc, field)))
++  order = wp.empty(source.D.shape, dtype=int)
++  inverse = wp.empty(source.D.shape, dtype=int)
++  jacobian = wp.empty_like(data.efc.J)
++  wp.launch(_row_order, dim=order.shape, inputs=[data.nefc, source.type, source.id], outputs=[order, inverse])
++  wp.launch(_gather_rows, dim=order.shape, inputs=[source, order], outputs=[target])
++  wp.launch(_gather_jacobian, dim=data.efc.J.shape, inputs=[data.efc.J, order], outputs=[jacobian])
++  wp.launch(
++    _remap_contacts,
++    dim=data.contact.efc_address.shape,
++    inputs=[data.contact.worldid, data.nacon, inverse],
++    outputs=[data.contact.efc_address],
++  )
++  for field in _FIELDS:
++    wp.copy(getattr(data.efc, field), getattr(target, field))
++  wp.copy(data.efc.J, jacobian)
+diff --git a/mujoco_warp/_src/constraint_order_test.py b/mujoco_warp/_src/constraint_order_test.py
+new file mode 100644
+index 0000000..959debc
+--- /dev/null
++++ b/mujoco_warp/_src/constraint_order_test.py
+@@ -0,0 +1,136 @@
++# Copyright 2025 The Newton Developers
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++# ==============================================================================
++
++"""Dense constraint layout and contact row mapping regression."""
++
++import mujoco
++import numpy as np
++import warp as wp
++
++import mujoco_warp as mjw
++from mujoco_warp import test_data
++from mujoco_warp._src import constraint
++from mujoco_warp._src import constraint_order
++from mujoco_warp._src.types import ConstraintType
++
++
++def test_canonical_block_rows_and_contact_mapping():
++  _, _, _, d = test_data.fixture(
++    xml='<mujoco><worldbody><body><freejoint/><geom type="sphere" size=".1"/></body></worldbody></mujoco>',
++    nworld=2,
++    nconmax=8,
++    njmax=17,
++  )
++  # Equality components must remain together; friction/limits precede contacts.
++  kinds = [ConstraintType.EQUALITY] * 3 + [ConstraintType.FRICTION_DOF] * 2 + [ConstraintType.LIMIT_JOINT] * 2
++  kinds += [ConstraintType.CONTACT_ELLIPTIC] * 6
++  base = {}
++  for field in constraint_order._FIELDS + ("J",):
++    value = getattr(d.efc, field).numpy()
++    value[:] = np.arange(value.size, dtype=value.dtype).reshape(value.shape)
++    base[field] = value
++  for world in range(d.nworld):
++    base["type"][world, :13] = kinds
++    base["id"][world, :13] = [5, 5, 5, 0, 1, 0, 1] + [2 * world] * 3 + [2 * world + 1] * 3
++  wp.copy(d.nefc, wp.array([13, 13], dtype=int))
++  d.nacon.fill_(4)
++  worlds = np.full(d.naconmax, -1, dtype=np.int32)
++  worlds[:4] = [0, 0, 1, 1]
++  wp.copy(d.contact.worldid, wp.array(worlds, dtype=int))
++
++  def canonicalize():
++    constraint_order.order_constraints_dense(d)
++
++  if wp.get_device().is_cuda and not wp.config.verify_cuda:
++    with wp.ScopedCapture() as capture:
++      canonicalize()
++    run = lambda: wp.capture_launch(capture.graph)
++  else:
++    run = canonicalize
++  blocks = [np.arange(3), np.array([3]), np.array([4]), np.array([5]), np.array([6]), np.arange(7, 10), np.arange(10, 13)]
++  rng = np.random.default_rng(72)
++  for _ in range(20):
++    orders = [np.concatenate([blocks[i] for i in rng.permutation(len(blocks))]) for _ in range(d.nworld)]
++    for field, value in base.items():
++      permuted = value.copy()
++      for world, order in enumerate(orders):
++        permuted[world, :13] = value[world, order]
++      wp.copy(getattr(d.efc, field), wp.array(permuted, dtype=getattr(d.efc, field).dtype))
++    addresses = np.full(d.contact.efc_address.shape, -1, dtype=np.int32)
++    expected = addresses.copy()
++    for world, order in enumerate(orders):
++      inverse = np.argsort(order)
++      for local in range(2):
++        rows = np.arange(7 + local * 3, 10 + local * 3)
++        addresses[2 * world + local, :3] = inverse[rows]
++        expected[2 * world + local, :3] = rows
++    wp.copy(d.contact.efc_address, wp.array(addresses, dtype=int))
++    run()
++    for field, value in base.items():
++      np.testing.assert_array_equal(getattr(d.efc, field).numpy().view(np.uint8), value.view(np.uint8))
++    np.testing.assert_array_equal(d.contact.efc_address.numpy(), expected)
++
++  # Empty counts preserve inactive/padded storage and negative contact addresses.
++  d.nefc.zero_()
++  d.nacon.zero_()
++  run()
++  for field, value in base.items():
++    np.testing.assert_array_equal(getattr(d.efc, field).numpy(), value)
++
++
++def test_dense_constraint_generation_preserves_values():
++  mjm, mjd, m, _ = test_data.fixture(
++    xml="""<mujoco>
++      <option cone="elliptic" jacobian="dense"/>
++      <worldbody>
++        <geom type="plane" size="5 5 .1"/>
++        <body name="a" pos="-.2 0 .02"><freejoint/><geom type="box" size=".05 .05 .03" condim="6"/></body>
++        <body name="b" pos=".2 0 .02"><freejoint/><geom type="box" size=".05 .05 .03" condim="6"/></body>
++        <body pos="0 0 1"><joint type="slide" limited="true" range="-.1 .1" frictionloss=".1"/>
++          <geom type="sphere" size=".05"/></body>
++      </worldbody>
++      <equality><connect body1="a" body2="b" anchor="0 0 0"/></equality>
++    </mujoco>""",
++  )
++  mjd.qpos[-1] = 0.2
++  mjd.qvel[0] = 0.5
++  mujoco.mj_forward(mjm, mjd)
++  d = mjw.put_data(mjm, mjd, nworld=4, nconmax=32, njmax=128)
++  m.opt.deterministic_contacts = True
++  mjw.collision(m, d)
++  m.opt.deterministic_contacts = False
++  constraint.make_constraint(m, d)
++  counts = d.nefc.numpy()
++  kinds, identities = d.efc.type.numpy(), d.efc.id.numpy()
++  expected = {}
++  for field in ("type", "id", "J", "pos", "margin", "D", "vel", "aref", "frictionloss", "Jqvel"):
++    values = getattr(d.efc, field).numpy()
++    expected[field] = [
++      values[w, np.lexsort((np.arange(n), identities[w, :n], kinds[w, :n]))].copy() for w, n in enumerate(counts)
++    ]
++  assert {
++    ConstraintType.EQUALITY,
++    ConstraintType.FRICTION_DOF,
++    ConstraintType.LIMIT_JOINT,
++    ConstraintType.CONTACT_ELLIPTIC,
++  } <= set(kinds[0, : counts[0]])
++  m.opt.deterministic_contacts = True
++  for _ in range(10):
++    constraint.make_constraint(m, d)
++    np.testing.assert_array_equal(d.nefc.numpy(), counts)
++    for field, rows in expected.items():
++      actual = getattr(d.efc, field).numpy()
++      for world, row in enumerate(rows):
++        np.testing.assert_array_equal(actual[world, : counts[world]].view(np.uint8), row.view(np.uint8))

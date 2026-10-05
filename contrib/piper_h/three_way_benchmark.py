@@ -113,7 +113,7 @@ def main():
   }
   source_dir = Path(__file__).resolve().parent
   sources = [*source_dir.glob("*.py"), *source_dir.glob("*.xml"), source_dir / "meshes/cube.obj"]
-  sources.append(source_dir.parent.parent / "mujoco_warp/_src/collision_sdf.py")
+  sources.append(Path(mjw.__file__).resolve().parent / "_src/collision_sdf.py")
   output["source_sha256"] = {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(sources)}
 
   def save():

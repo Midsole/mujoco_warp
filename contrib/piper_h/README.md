@@ -20,7 +20,9 @@
 在仓库根目录执行。所需模型已包含在示例中，不依赖旧项目目录或 ROS。
 
 ```bash
-# 安装运行、测试和网页查看器依赖
+# 初始化官方子模块并生成带补丁的引擎，再安装依赖
+git submodule update --init --recursive
+uv run --no-project python tools/prepare_mujoco_warp.py
 uv sync --locked --extra dev
 
 # 默认 Warp GPU 后端，原生 MuJoCo 窗口
@@ -227,6 +229,21 @@ uv run python contrib/kernel_analyzer/kernel_analyzer/cli.py contrib/piper_h/gra
 本示例不注册到默认 benchmark，也不修改公共查看器或物理引擎接口。
 
 ### 本地性能结果
+
+PiPER H 的 `rollout_warp` 默认启用确定性接触路径：SDF 搜索起点写入独立固定槽位，使用整数前缀和压缩，再将完整接触记录按 world、几何标识和物理字段排序。
+搜索距离、梯度、法向和材料参数的公式保持不变；这消除接触输出顺序漂移，不保证求解器或整条轨迹逐位一致。接触容量溢出仍使运行验收失败。
+该路径目前支持刚性几何，不支持 flex，额外使用临时显存；排序成本随每个 world 的接触数量增长。
+该模式在 dense 路径中还会按约束类型、对象/接触标识固定最终约束行布局，保留块内维度顺序，并同步更新接触的约束行映射；排序仅复制数据，不改变约束公式。临时分配仍使用整数原子计数，但其顺序不再传入求解器。该排序使用临时显存，比较成本按每个 world 的活动约束数平方增长。
+该模式还让 dense Newton 求解器的椭圆摩擦锥 Hessian 按固定接触顺序累加，每个矩阵元素只由一个线程写回，避免浮点原子累加。其他动力学和求解器归约仍可能引入数值差异，不能保证任意模型、设备或软件版本间逐位复现。约束布局固定目前仅支持 dense Jacobian；sparse 路径保持原行为。
+
+程序调用可传 `deterministic_contacts=False` 恢复原路径作对照。直接使用 MuJoCo Warp 时通过 `warp_model.opt.deterministic_contacts=True` 启用，默认仍关闭。
+已启动的网页服务需重新启动才能加载这次修改。
+
+```sh
+uv run pytest .build/mujoco_warp/mujoco_warp/_src/collision_order_test.py contrib/piper_h/deterministic_contacts_test.py -q
+uv run pytest .build/mujoco_warp/mujoco_warp/_src/constraint_order_test.py -q
+uv run pytest .build/mujoco_warp/mujoco_warp/_src/solver_test.py -k elliptic_dense_hessian -q
+```
 
 `parallel_efficiency_benchmark.py` 保留在 Git 中。性能测量生成的报告、CSV 和 JSON 统一放在
 `results/parallel_efficiency/`，整个 `results/` 目录由 Git 忽略，仅保存在本机。

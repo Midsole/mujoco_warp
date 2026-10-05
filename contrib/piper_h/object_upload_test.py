@@ -163,7 +163,7 @@ def test_uploaded_object_preview_and_run_replay(tmp_path):
   renderer = grasp_dashboard.ReplayRenderer(tmp_path)
   try:
     frame, _ = renderer.preview(asset["id"], settings)
-    assert Image.open(io.BytesIO(frame)).size == (640, 480)
+    assert Image.open(io.BytesIO(frame)).size == (640, 360)
     run_id = "e" * 32
     directory = tmp_path / run_id
     directory.mkdir()

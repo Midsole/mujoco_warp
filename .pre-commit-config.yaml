@@ -1,23 +1,29 @@
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.14 # Use the latest Ruff version
+    rev: v0.14.14
     hooks:
       - id: ruff
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0 # Use the latest version
+    rev: v6.0.0
     hooks:
       - id: check-yaml
   - repo: https://github.com/astral-sh/uv-pre-commit
-    # uv version.
     rev: 0.9.27
     hooks:
       - id: uv-lock
   - repo: local
     hooks:
+      - id: patched-engine
+        name: Patched engine ruff and kernel analyzer
+        entry: uv run python tools/check_engine.py
+        language: system
+        pass_filenames: false
+        always_run: true
       - id: kernel-analyzer
-        name: kernel-analyzer
-        entry: uv run python contrib/kernel_analyzer/kernel_analyzer/cli.py
+        name: Outer kernel analyzer
+        entry: uv run python contrib/kernel_analyzer/kernel_analyzer/cli.py --types .build/mujoco_warp/mujoco_warp/_src/types.py
         language: system
         types: [python]
+exclude: ^(external/|\.build/)

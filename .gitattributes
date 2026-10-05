@@ -1,0 +1,2 @@
+# Unified diffs contain a space prefix on empty context lines.
+patches/mujoco_warp/*.patch -whitespace

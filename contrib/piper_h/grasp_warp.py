@@ -175,6 +175,7 @@ def rollout_warp(
   record_contact_forces=False,
   warp_model=None,
   sdf_mode="octree",
+  deterministic_contacts=True,
 ):
   """Run independent worlds; batched states and forces have a leading world axis."""
   if isinstance(nworld, bool) or not isinstance(nworld, int) or nworld < 1:
@@ -191,6 +192,7 @@ def rollout_warp(
   count = len(trajectory["ctrl"])
   with wp.ScopedDevice("cuda:0"):
     m = mjw.put_model(model) if warp_model is None else warp_model
+    m.opt.deterministic_contacts = deterministic_contacts
     if sdf_mode == "dense":
       from dense_sdf import attach_dense_sdf
 

@@ -20,7 +20,7 @@ from threading import Thread
 REPO = Path(__file__).resolve().parents[2]
 for site in sorted((REPO / ".venv/lib").glob("python*/site-packages")):
   sys.path.append(str(site))
-sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / ".build/mujoco_warp"))
 
 import mujoco
 import numpy as np
@@ -311,7 +311,7 @@ def main():
     out["physim_asset"] = meta
     out["mujoco_model"] = {name: int(getattr(model, name)) for name in ("nbody", "ngeom", "nv", "nu", "nq")}
     sources = [*Path(__file__).parent.glob("*.py"), *Path(__file__).parent.glob("*.xml"), *physim_sources]
-    sources += [REPO / "mujoco_warp/_src/collision_sdf.py", Path(__file__).parent / "meshes/cube.obj"]
+    sources += [Path(mjw.__file__).resolve().parent / "_src/collision_sdf.py", Path(__file__).parent / "meshes/cube.obj"]
     sources += [args.physim_root / "models/piper-h" / name for name in ("collision-fields.npz", "inner-pad.json")]
     sources += [Path(__file__).parent / "meshes" / f"gripper_link{i}.stl" for i in (1, 2)]
     out["source_sha256"] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(sources)}
